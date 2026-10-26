@@ -3,11 +3,11 @@
 use std::path::PathBuf;
 
 use clap::{ArgAction, Args, Parser, Subcommand};
-use graph_network_core::rpc::BlockSpec;
+use graph_monitor_core::rpc::BlockSpec;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "graph-network",
+    name = "graph-monitor",
     version,
     about = "Insight into Graph Protocol state",
     long_about = "A CLI for gaining insight into Graph Protocol state.\n\n\
@@ -25,11 +25,11 @@ pub struct Cli {
 #[derive(Debug, Clone, Args)]
 pub struct GlobalArgs {
     /// Network to query. Defaults to `default_network` from config.
-    #[arg(long, global = true, env = "GRAPH_NETWORK_NETWORK")]
+    #[arg(long, global = true, env = "GRAPH_MONITOR_NETWORK")]
     pub network: Option<String>,
 
     /// Override the RPC endpoint without touching config.
-    #[arg(long, global = true, env = "GRAPH_NETWORK_RPC_URL")]
+    #[arg(long, global = true, env = "GRAPH_MONITOR_RPC_URL")]
     pub rpc_url: Option<String>,
 
     /// Block to read at: a number, 0x-prefixed hex, or `latest`.
@@ -45,7 +45,7 @@ pub struct GlobalArgs {
     pub color: crate::style::ColorChoice,
 
     /// Explicit config file. Skips the XDG and working-directory files.
-    #[arg(long, global = true, env = "GRAPH_NETWORK_CONFIG")]
+    #[arg(long, global = true, env = "GRAPH_MONITOR_CONFIG")]
     pub config: Option<PathBuf>,
 
     /// Ignore the shipped config layer for this run.
@@ -100,7 +100,7 @@ pub enum Command {
         interval: u64,
 
         /// Port for the metrics server.
-        #[arg(long, default_value = "9090", env = "GRAPH_NETWORK_METRICS_PORT")]
+        #[arg(long, default_value = "9090", env = "GRAPH_MONITOR_METRICS_PORT")]
         metrics_port: u16,
 
         #[command(flatten)]

@@ -1,11 +1,11 @@
 [package]
-name = "graph-network-core"
+name = "graph-monitor-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Core config, RPC access and domain logic for the graph-network CLI"
+description = "Core config, RPC access and domain logic for the graph-monitor CLI"
 
 [dependencies]
 alloy.workspace = true

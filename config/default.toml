@@ -1,7 +1,7 @@
 # Shipped configuration, embedded into the binary at build time.
 #
 # User config extends this file. To adjust one value, set just that value in
-# ~/.config/graph-network/config.toml — per-key merging keeps everything else.
+# ~/.config/graph-monitor/config.toml — per-key merging keeps everything else.
 # To ignore this file entirely, set `use_defaults = false` (or pass --no-defaults).
 
 default_network = "arbitrum-one"

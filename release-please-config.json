@@ -1,0 +1,31 @@
+{
+  "changelog-path": "CHANGELOG.md",
+  "release-type": "simple",
+  "draft": false,
+  "include-component-in-tag": false,
+  "packages": {
+    ".": {
+      "package-name": "graph-monitor",
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "Cargo.toml",
+          "jsonpath": "$.workspace.package.version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name=='graph-monitor')].version"
+        },
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name=='graph-monitor-core')].version"
+        }
+      ]
+    }
+  },
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json"
+}

@@ -7,9 +7,9 @@ use std::net::SocketAddr;
 use std::sync::OnceLock;
 
 use axum::{http::StatusCode, routing::get, Router};
-use graph_network_core::engine::CycleReport;
-use graph_network_core::remediate::RemediationReport;
-use graph_network_core::watches::{
+use graph_monitor_core::engine::CycleReport;
+use graph_monitor_core::remediate::RemediationReport;
+use graph_monitor_core::watches::{
     M_ACTIVITY_SEEN, M_ALLOWANCE, M_ALLOWANCE_EXACT_MAX, M_ALLOWANCE_UNLIMITED, M_ETH_BALANCE,
     M_EVER_TRANSACTED, M_GRT_BALANCE, M_IDLE_SECONDS, M_REMEDIATION_BELOW,
 };
@@ -80,52 +80,52 @@ impl Metrics {
     fn new() -> Self {
         Self {
             eth_balance: register_gauge_vec!(
-                "gn_account_eth_balance",
+                "gm_account_eth_balance",
                 "ETH balance of a watched account",
                 ACCOUNT_LABELS
             )
             .unwrap(),
             grt_balance: register_gauge_vec!(
-                "gn_account_grt_balance",
+                "gm_account_grt_balance",
                 "GRT balance of a watched account",
                 ACCOUNT_LABELS
             )
             .unwrap(),
             allowance: register_gauge_vec!(
-                "gn_account_allowance_grt",
+                "gm_account_allowance_grt",
                 "GRT allowance granted by owner to spender. Lossy above 2^53 — use \
-                 gn_account_allowance_unlimited to test for an inexhaustible approval",
+                 gm_account_allowance_unlimited to test for an inexhaustible approval",
                 ALLOWANCE_LABELS
             )
             .unwrap(),
             idle_seconds: register_gauge_vec!(
-                "gn_account_idle_seconds",
+                "gm_account_idle_seconds",
                 "Seconds since the account last sent a transaction, at the pinned block",
                 ACCOUNT_LABELS
             )
             .unwrap(),
             allowance_unlimited: register_int_gauge_vec!(
-                "gn_account_allowance_unlimited",
+                "gm_account_allowance_unlimited",
                 "1 when the allowance is effectively inexhaustible. Computed on exact integers, \
                  because the gauge cannot represent 2^256 faithfully",
                 ALLOWANCE_LABELS
             )
             .unwrap(),
             allowance_exact_max: register_int_gauge_vec!(
-                "gn_account_allowance_exact_max",
+                "gm_account_allowance_exact_max",
                 "1 when the allowance is exactly uint256 max — an infinite approval never drawn \
                  against",
                 ALLOWANCE_LABELS
             )
             .unwrap(),
             ever_transacted: register_int_gauge_vec!(
-                "gn_account_ever_transacted",
+                "gm_account_ever_transacted",
                 "1 when the account has ever sent a transaction",
                 ACCOUNT_LABELS
             )
             .unwrap(),
             activity_seen: register_int_gauge_vec!(
-                "gn_account_activity_seen",
+                "gm_account_activity_seen",
                 "1 when the activity search found something inside its window. For an event \
                  watch, 0 means nothing within the lookback — not that the account never acted",
                 ACCOUNT_LABELS
@@ -133,7 +133,7 @@ impl Metrics {
             .unwrap(),
             read_duration: register_histogram_vec!(
                 prometheus::HistogramOpts::new(
-                    "gn_read_duration_seconds",
+                    "gm_read_duration_seconds",
                     "Wall time of one watch, by kind"
                 )
                 .buckets(READ_BUCKETS.to_vec()),
@@ -141,52 +141,52 @@ impl Metrics {
             )
             .unwrap(),
             read_errors: register_int_counter_vec!(
-                "gn_read_errors_total",
-                "Watches that could not read, by kind. Rising without gn_source_up dropping \
+                "gm_read_errors_total",
+                "Watches that could not read, by kind. Rising without gm_source_up dropping \
                  usually means a provider limit rather than an outage",
                 &["network", "watch"]
             )
             .unwrap(),
             build_info: register_int_gauge_vec!(
-                "gn_build_info",
+                "gm_build_info",
                 "Always 1. Carries the running version so a change in behaviour can be lined \
                  up against a deploy",
                 &["version"]
             )
             .unwrap(),
             read_ok: register_int_gauge_vec!(
-                "gn_read_ok",
+                "gm_read_ok",
                 "1 when this watch read its value successfully",
                 WATCH_LABELS
             )
             .unwrap(),
             read_unknown: register_int_gauge_vec!(
-                "gn_read_unknown",
+                "gm_read_unknown",
                 "1 when this watch could not read its value. Distinct from any value, including \
                  zero",
                 WATCH_LABELS
             )
             .unwrap(),
             source_up: register_int_gauge_vec!(
-                "gn_source_up",
+                "gm_source_up",
                 "1 when the data source passed verification",
                 &["network", "source"]
             )
             .unwrap(),
             source_lag_seconds: register_gauge_vec!(
-                "gn_source_lag_seconds",
+                "gm_source_lag_seconds",
                 "How far the source's head trails wall clock",
                 &["network", "source"]
             )
             .unwrap(),
             source_block_height: register_int_gauge_vec!(
-                "gn_source_block_height",
+                "gm_source_block_height",
                 "Head block height reported by the source",
                 &["network", "source"]
             )
             .unwrap(),
             remediation_threshold: register_gauge_vec!(
-                "gn_account_remediation_below",
+                "gm_account_remediation_below",
                 "Balance below which the tool tops this account up. Exported whenever \
                  remediation is configured, not only when it fires, so a dashboard can draw \
                  the line while the balance is still healthy. Not an alert threshold — \
@@ -195,25 +195,25 @@ impl Metrics {
             )
             .unwrap(),
             remediation_total: register_int_counter_vec!(
-                "gn_remediation_total",
+                "gm_remediation_total",
                 "Remediation attempts by outcome",
                 &["network", "account", "asset", "outcome"]
             )
             .unwrap(),
             block_height: register_int_gauge_vec!(
-                "gn_block_height",
+                "gm_block_height",
                 "Block every value in the last cycle was read at",
                 &["network"]
             )
             .unwrap(),
             cycle_last_success: register_gauge!(
-                "gn_cycle_last_success_timestamp",
+                "gm_cycle_last_success_timestamp",
                 "Unix time of the last cycle that read anything. Alert on time() - this: it \
                  catches a process that is alive but wedged, which `up` cannot"
             )
             .unwrap(),
             cycle_duration: register_histogram!(prometheus::HistogramOpts::new(
-                "gn_cycle_duration_seconds",
+                "gm_cycle_duration_seconds",
                 "Wall time of one full cycle"
             )
             .buckets(CYCLE_BUCKETS.to_vec()))
@@ -380,8 +380,8 @@ impl Metrics {
 }
 
 /// Metric label for the asset a measurement describes.
-fn unit_asset(unit: graph_network_core::watch::Unit) -> &'static str {
-    use graph_network_core::watch::Unit;
+fn unit_asset(unit: graph_monitor_core::watch::Unit) -> &'static str {
+    use graph_monitor_core::watch::Unit;
     match unit {
         Unit::Eth => "eth",
         Unit::Grt => "grt",

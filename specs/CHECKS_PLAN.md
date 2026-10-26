@@ -1,6 +1,6 @@
 # Check Engine Plan
 
-How `graph-network` grows from a snapshot CLI into the tool that replaces `network-monitor`.
+How `graph-monitor` grows from a snapshot CLI into the tool that replaces `network-monitor`.
 
 ## Goal
 
@@ -142,9 +142,9 @@ its own verdict, so "my RPC is 10 minutes stale" is a first-class alertable cond
 than a pile of mysterious `Unknown`s.
 
 ```
-gn_source_up{source,network}              gauge  1/0
-gn_source_lag_seconds{source,network}     gauge
-gn_source_block_height{source,network}    gauge
+gm_source_up{source,network}              gauge  1/0
+gm_source_lag_seconds{source,network}     gauge
+gm_source_block_height{source,network}    gauge
 ```
 
 **This stage absorbs three `network-monitor` checks rather than porting them later.**
@@ -188,7 +188,7 @@ rather than being a convention each check re-implements:
   rejected as `intrinsic gas too low` the moment that estimate ticks up.
 - Serial execution per signer. No `Promise.all` equivalent after the broadcast point; local
   nonce races are avoided by construction rather than by a nonce manager.
-- Success is silent. Failure is recorded as `gn_remediation_total{outcome="failed"}` and logged
+- Success is silent. Failure is recorded as `gm_remediation_total{outcome="failed"}` and logged
   at error level — "auto-fix is broken" is the condition worth paging on, and Grafana grades it.
 - A transaction that is mined but **reverts** counts as failure. It succeeded at the RPC layer
   and did nothing, which is precisely the case a naive implementation reports as success.
@@ -211,8 +211,8 @@ the rules become enforced by construction instead of by code review.
 ## Run modes
 
 ```
-graph-network check run [--filter <id>] [--block <n>]     # one-shot, console, exits
-graph-network serve --interval 2m --metrics-port 9090     # loop, /metrics, optional remediation
+graph-monitor check run [--filter <id>] [--block <n>]     # one-shot, console, exits
+graph-monitor serve --interval 2m --metrics-port 9090     # loop, /metrics, optional remediation
 ```
 
 One binary, two modes, one set of checks. `--block` gives the engine something
@@ -238,40 +238,40 @@ zero errors look like one. Use `inc_by(0)` — same materialization, no skew.
 
 ## Metrics design
 
-Prefix `gn_`. Every series carries `network`; account series carry `group`, `account` (the
+Prefix `gm_`. Every series carries `network`; account series carry `group`, `account` (the
 label) and `address`.
 
 ```
 # ---- observed state ------------------------------------------------------------------
-gn_account_eth_balance{network,group,account,address}      gauge
-gn_account_grt_balance{network,group,account,address}      gauge
-gn_account_allowance_grt{network,group,owner,spender}      gauge
-gn_account_idle_seconds{network,group,account,address}     gauge
+gm_account_eth_balance{network,group,account,address}      gauge
+gm_account_grt_balance{network,group,account,address}      gauge
+gm_account_allowance_grt{network,group,owner,spender}      gauge
+gm_account_idle_seconds{network,group,account,address}     gauge
 
 # ---- exact classifications f64 cannot carry ------------------------------------------
-gn_account_allowance_unlimited{network,group,owner,spender}  gauge  1/0
-gn_account_allowance_exact_max{network,group,owner,spender}  gauge  1/0
+gm_account_allowance_unlimited{network,group,owner,spender}  gauge  1/0
+gm_account_allowance_exact_max{network,group,owner,spender}  gauge  1/0
 
 # ---- readability, not judgment -------------------------------------------------------
-gn_read_ok{check,network,group,account}                    gauge  1/0
-gn_read_unknown{check,network,group,account}               gauge  1/0
+gm_read_ok{check,network,group,account}                    gauge  1/0
+gm_read_unknown{check,network,group,account}               gauge  1/0
 
 # ---- source health -------------------------------------------------------------------
-gn_source_up{source,network}                               gauge  1/0
-gn_source_lag_seconds{source,network}                      gauge
-gn_source_block_height{source,network}                     gauge
+gm_source_up{source,network}                               gauge  1/0
+gm_source_lag_seconds{source,network}                      gauge
+gm_source_block_height{source,network}                     gauge
 
 # ---- remediation ---------------------------------------------------------------------
-gn_remediation_threshold_eth{network,group,account}        gauge
-gn_remediation_threshold_grt{network,group,account}        gauge
-gn_remediation_total{network,account,asset,outcome}        counter
+gm_remediation_threshold_eth{network,group,account}        gauge
+gm_remediation_threshold_grt{network,group,account}        gauge
+gm_remediation_total{network,account,asset,outcome}        counter
 
 # ---- liveness and provenance ---------------------------------------------------------
-gn_block_height{network}                                   gauge
-gn_cycle_last_success_timestamp                            gauge
-gn_cycle_duration_seconds                                  histogram
-gn_read_duration_seconds{check}                            histogram
-gn_read_errors_total{network,source}                       counter
+gm_block_height{network}                                   gauge
+gm_cycle_last_success_timestamp                            gauge
+gm_cycle_duration_seconds                                  histogram
+gm_read_duration_seconds{check}                            histogram
+gm_read_errors_total{network,source}                       counter
 ```
 
 `group` as a label is what makes "are any oracle wallets low" a single query rather than a
@@ -279,7 +279,7 @@ hand-maintained list of account names in a Grafana panel.
 
 Three deliberate choices:
 
-**No `gn_check_breach`, no severity label, no alert thresholds.** Those were artefacts of the
+**No `gm_check_breach`, no severity label, no alert thresholds.** Those were artefacts of the
 tool judging. Grafana holds the thresholds now; the tool publishes what it saw.
 
 **Remediation thresholds *are* exported** — not as alert thresholds, but so a dashboard can
@@ -290,10 +290,10 @@ auto-fix is not keeping up. That is a question neither system can answer alone.
 **Block height is its own gauge, not a sample timestamp.** Our provenance rule wants the block
 to travel with every value, but Prometheus timestamps samples by scrape wall-clock and rejects
 out-of-order ones — backdating samples to block time would break ingestion. So the block is
-published alongside, and `gn_block_height` is what you correlate against when a value looks
+published alongside, and `gm_block_height` is what you correlate against when a value looks
 wrong. This is the one place the "one block, one truth" principle has to bend to the sink.
 
-`gn_check_unknown` being separate from `gn_check_breach` is what lets you alert on "this check
+`gm_check_unknown` being separate from `gm_check_breach` is what lets you alert on "this check
 has been blind for 10 minutes" — a condition the current monitor reports as a low-severity
 error and mostly ignores.
 
@@ -371,7 +371,7 @@ A `remediate` block implies its asset is watched, so the common case does not re
 
 Where the group does show up:
 
-- **Metrics label** — `gn_account_eth_balance{group="oracles"}`, so "is any oracle wallet low"
+- **Metrics label** — `gm_account_eth_balance{group="oracles"}`, so "is any oracle wallet low"
   is one query rather than a hand-maintained list of account names in a panel.
 - **Console grouping** — rows sectioned by group.
 - **CLI filter** — `--group oracles`.
@@ -547,9 +547,9 @@ An unlimited allowance is ~`1.157e59`; asking PromQL whether it is "at least 2^2
 So the tool exports the *classification* alongside the value, computed on exact `U256`:
 
 ```
-gn_account_allowance_grt{…}        gauge   the value, lossy above 2^53
-gn_account_allowance_unlimited{…}  gauge   1/0, exact
-gn_account_allowance_exact_max{…}  gauge   1/0, exact — never drawn against
+gm_account_allowance_grt{…}        gauge   the value, lossy above 2^53
+gm_account_allowance_unlimited{…}  gauge   1/0, exact
+gm_account_allowance_exact_max{…}  gauge   1/0, exact — never drawn against
 ```
 
 This is not the tool judging. It is the tool reporting something the wire format would
@@ -567,8 +567,8 @@ design rather than an afterthought:
 
 | Failure | Detection |
 |---|---|
-| Process dead | `up{job="graph-network"} == 0` — free with a scrape target |
-| Process alive, cycles wedged | `time() - gn_cycle_last_success_timestamp > 10m` |
+| Process dead | `up{job="graph-monitor"} == 0` — free with a scrape target |
+| Process alive, cycles wedged | `time() - gm_cycle_last_success_timestamp > 10m` |
 | Whole metrics stack down | External heartbeat (healthchecks.io or similar) |
 
 This is the concrete payoff of `serve`-and-scrape over push: with a Pushgateway a dead job's

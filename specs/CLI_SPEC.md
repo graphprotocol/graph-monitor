@@ -15,7 +15,7 @@ history in v1 — which means every value the tool reports is a value that can b
 single block. Anything requiring history (activity timelines, "last seen", rate-of-change) is
 out of scope until we add a second data source.
 
-The binary is `graph-network`.
+The binary is `graph-monitor`.
 
 ### Principles
 
@@ -76,8 +76,8 @@ Resolution order, later wins:
 
 1. **Shipped defaults** — `config/default.toml`, embedded in the binary at build time. Holds
    known networks, the address book, and the default account list.
-2. `$XDG_CONFIG_HOME/graph-network/config.toml` (fallback `~/.config/graph-network/config.toml`)
-3. `./graph-network.toml` in the working directory, if present
+2. `$XDG_CONFIG_HOME/graph-monitor/config.toml` (fallback `~/.config/graph-monitor/config.toml`)
+3. `./graph-monitor.toml` in the working directory, if present
 4. Environment variables
 5. Command-line flags
 
@@ -248,7 +248,7 @@ cron.
 ## Commands
 
 ```
-graph-network
+graph-monitor
 ├── status                       read every watch and show what it found
 │   ├── --flat                   one line per watch instead of grouped tables
 │   └── --unreadable-only        only watches that failed to read
@@ -268,7 +268,7 @@ As components beyond accounts land, each gets a top-level subcommand that narrow
 that component and renders it in whatever shape suits its data:
 
 ```
-graph-network billing | contracts | oracles | subgraphs | infra
+graph-monitor billing | contracts | oracles | subgraphs | infra
 ```
 
 Component-first rather than check-kind-first, because **output shape follows the component**:

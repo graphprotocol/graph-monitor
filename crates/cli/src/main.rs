@@ -1,4 +1,4 @@
-//! `graph-network` — a CLI for gaining insight into Graph Protocol state.
+//! `graph-monitor` — a CLI for gaining insight into Graph Protocol state.
 
 mod cli;
 mod metrics;
@@ -10,9 +10,9 @@ use std::process::ExitCode;
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use graph_network_core::config::{Config, LoadOptions, Resolved};
-use graph_network_core::engine::{CycleReport, Engine};
-use graph_network_core::remediate::Executor;
+use graph_monitor_core::config::{Config, LoadOptions, Resolved};
+use graph_monitor_core::engine::{CycleReport, Engine};
+use graph_monitor_core::remediate::Executor;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, Command, ConfigCommand, Filter, RemediationArgs};
@@ -47,7 +47,7 @@ fn init_tracing(verbosity: u8) {
     };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         EnvFilter::new(format!(
-            "graph_network={default},graph_network_core={default}"
+            "graph_monitor={default},graph_monitor_core={default}"
         ))
     });
 
@@ -61,7 +61,7 @@ fn init_tracing(verbosity: u8) {
 
 /// A core error carries its own exit code; anything else is a usage problem.
 fn exit_code_for(err: &anyhow::Error) -> u8 {
-    err.downcast_ref::<graph_network_core::Error>()
+    err.downcast_ref::<graph_monitor_core::Error>()
         .map(|e| e.exit_code() as u8)
         .unwrap_or(EXIT_USAGE)
 }
@@ -182,7 +182,7 @@ fn filter_accounts(mut resolved: Resolved, filter: &Filter) -> Result<Resolved> 
         return Ok(resolved);
     }
 
-    let in_group = |account: &graph_network_core::config::ResolvedAccount, want: &str| {
+    let in_group = |account: &graph_monitor_core::config::ResolvedAccount, want: &str| {
         account
             .group
             .as_deref()
@@ -236,7 +236,7 @@ fn filter_accounts(mut resolved: Resolved, filter: &Filter) -> Result<Resolved> 
     Ok(resolved)
 }
 
-fn matches_account(account: &graph_network_core::config::ResolvedAccount, want: &str) -> bool {
+fn matches_account(account: &graph_monitor_core::config::ResolvedAccount, want: &str) -> bool {
     if account.label.eq_ignore_ascii_case(want) {
         return true;
     }
@@ -252,7 +252,7 @@ fn filter_spenders(mut resolved: Resolved, wanted: &[String]) -> Result<Resolved
         return Ok(resolved);
     }
 
-    let matches = |spec: &graph_network_core::config::Spender, want: &str| -> bool {
+    let matches = |spec: &graph_monitor_core::config::Spender, want: &str| -> bool {
         spec.display.eq_ignore_ascii_case(want)
             || want
                 .parse::<alloy::primitives::Address>()
@@ -361,7 +361,7 @@ fn build_executor(config: &EngineConfig, args: &RemediationArgs) -> Result<Optio
         bail!(
             "--remediate was passed but network {:?} has no signer_key configured.\n\
              Add it to your own config (never the shipped defaults):\n\n  \
-             [networks.{}]\n  signer_key = \"${{GRAPH_NETWORK_SIGNER_KEY}}\"",
+             [networks.{}]\n  signer_key = \"${{GRAPH_MONITOR_SIGNER_KEY}}\"",
             config.network,
             config.network
         );
@@ -423,7 +423,7 @@ async fn serve(
         }
 
         let report = engine
-            .run_cycle(graph_network_core::rpc::BlockSpec::Latest)
+            .run_cycle(graph_monitor_core::rpc::BlockSpec::Latest)
             .await;
         m.publish(&report);
 

@@ -2,5 +2,5 @@
 **/*.rs.bk
 
 # Local operator config. Watchlists tend to hold operational addresses, so a stray
-# graph-network.toml in the repo root should never be committed by accident.
-/graph-network.toml
+# graph-monitor.toml in the repo root should never be committed by accident.
+/graph-monitor.toml
