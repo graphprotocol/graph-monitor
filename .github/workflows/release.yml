@@ -48,6 +48,8 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     permissions:
+      # The repo is private, so checkout needs contents:read once any permission is set.
+      contents: read
       packages: write
     steps:
       - name: Prepare platform pair
