@@ -1,0 +1,40 @@
+[workspace]
+members = ["crates/core", "crates/cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/graphprotocol/graph-network"
+
+[workspace.dependencies]
+alloy = { version = "2.4", default-features = false, features = [
+    "std",
+    "contract",
+    "provider-http",
+    "reqwest-rustls-tls",
+    "rpc-types-eth",
+    "sol-types",
+    "json",
+    "signer-local",
+    "network",
+] }
+anyhow = "1.0"
+axum = "0.8"
+prometheus = "0.14"
+async-trait = "0.1.92"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+clap = { version = "4.6", features = ["derive", "env"] }
+dirs = "7.0"
+futures = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+# preserve_order keeps block provenance at the top of --json output instead of letting keys
+# sort alphabetically behind "accounts".
+serde_json = { version = "1.0", features = ["preserve_order"] }
+thiserror = "2.0"
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros"] }
+toml = "1.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

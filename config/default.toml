@@ -1,0 +1,166 @@
+# Shipped configuration, embedded into the binary at build time.
+#
+# User config extends this file. To adjust one value, set just that value in
+# ~/.config/graph-network/config.toml — per-key merging keeps everything else.
+# To ignore this file entirely, set `use_defaults = false` (or pass --no-defaults).
+
+default_network = "arbitrum-one"
+
+# ---------------------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------------------
+
+[networks.arbitrum-one]
+chain_id = 42161
+rpc_url = "https://arb1.arbitrum.io/rpc"
+# How far behind wall clock the head block may be before the source is called stale.
+# Arbitrum blocks are sub-second, so a minute is a couple of orders of magnitude of slack.
+max_lag = "60s"
+# Requests in flight. Low for the free public endpoint above, which returns 429 well before a
+# paid provider would. Activity watches search logs and are latency-bound, so raising this
+# against a real endpoint speeds them up almost linearly.
+max_concurrency = 6
+
+# Address book. Names here can be used anywhere an address is expected
+[networks.arbitrum-one.addresses]
+GraphToken                = "0x9623063377AD1B27544C965cCd7342f7EA7e88C7"
+BillingWallet             = "0x05F9Eea50C6BCd46c07C8EF64566AF9a9Cc91109"
+GraphTallyWallet          = "0x6AA2Ace7Ec77C06C1DAb1b0aFaC9d56d9C9D0e50"
+FoundationBillingMultisig = "0x0F284C9E0169fff667c5A0FF3cB2106AF87CCE23"
+NetworkMonitor            = "0x1d2a5EC3fD9431Abf01B16F6AAb16a5E46E358Ff"
+
+EpochBlockOracle          = "0x5f49491e965895deD343Af13389eE45EF60ED793"
+RewardsEligibilityOracle  = "0xF0a445E553BF9Bd3670fE66fc95c41FdEbbC094A"
+UpgradeIndexerCurationBot = "0xb8B9F098E2a04046770d42B2F93F1c91068876C5"
+SamOracleEdgeAndNode      = "0xdcAA0a094F2Eb7cF7f73248EE64217D59B7B938d"
+SamOracleGraphOps         = "0xBD9dc46cb1dd9F31dCbF0617c2Dd5f77A21dB8e8"
+SamOracleInfraDAO         = "0x16eAd4088d4308a7A4E0F7a1455ed56CDf1AC8AA"
+SamOracleSemiotic         = "0x10eb33C5E2fb6c7a37B110Cc4930d03A9e4C4D09"
+
+BillingContract             = "0x1b07d3344188908fb6deceac381f3ee63c48477a"
+PaymentsEscrow              = "0xf6Fcc27aAf1fcD8B254498c9794451d82afC673E"
+EBODataEdge                 = "0x633bb9790d7c4c59991cebd377c0ed6501a35ebe"
+SubgraphAvailabilityManager = "0x1cb555359319a94280acf85372ac2323aae2f5fd"
+RewardsEligibilityContract  = "0x02753BaE61C08AbD4351Bce7F48524935C2Cc78E"
+
+# ---------------------------------------------------------------------------------------
+# Accounts
+# ---------------------------------------------------------------------------------------
+
+# Foundation Billing
+[[accounts.arbitrum-one]]
+address = "FoundationBillingMultisig"
+group   = "billing"
+watch   = ["grt"]
+
+  [[accounts.arbitrum-one.allowances]]
+  spender = "NetworkMonitor"
+
+# Billing wallet
+[[accounts.arbitrum-one]]
+address = "BillingWallet"
+group   = "billing"
+watch   = ["eth", "grt"]
+
+  [accounts.arbitrum-one.activity]
+  emitter = "BillingContract"
+  event   = "TokensPulled(address,uint256)"
+
+  [[accounts.arbitrum-one.allowances]]
+  spender = "NetworkMonitor"
+
+# GraphTally wallet
+[[accounts.arbitrum-one]]
+address = "GraphTallyWallet"
+group   = "billing"
+watch   = ["eth", "grt"]
+
+  [accounts.arbitrum-one.activity]
+  emitter = "PaymentsEscrow"
+  event   = "Deposit(address,address,address,uint256)"
+
+# Monitor remediation wallet
+[[accounts.arbitrum-one]]
+address = "NetworkMonitor"
+group   = "infra"
+watch   = ["eth"]
+
+# EBO
+[[accounts.arbitrum-one]]
+address = "EpochBlockOracle"
+group   = "oracles"
+watch   = ["eth"]
+
+  [accounts.arbitrum-one.activity]
+  emitter = "EBODataEdge"
+  event   = "Log(bytes)"
+
+# REO
+[[accounts.arbitrum-one]]
+address = "RewardsEligibilityOracle"
+group   = "oracles"
+watch   = ["eth"]
+
+  [accounts.arbitrum-one.activity]
+  emitter = "RewardsEligibilityContract"
+  event   = "IndexerEligibilityRenewed(address,address)"
+
+# Upgrade indexer curation bot
+[[accounts.arbitrum-one]]
+address = "UpgradeIndexerCurationBot"
+group   = "infra"
+watch   = ["eth"]
+
+# SAM: Edge & Node
+[[accounts.arbitrum-one]]
+address = "SamOracleEdgeAndNode"
+group   = "oracles"
+watch   = ["eth"]
+
+  [accounts.arbitrum-one.activity]
+  emitter = "SubgraphAvailabilityManager"
+  event   = "OracleVote(bytes32,bool,uint256,uint256)"
+
+# SAM: GraphOps
+[[accounts.arbitrum-one]]
+address = "SamOracleGraphOps"
+group   = "oracles"
+watch   = ["eth"]
+
+  [accounts.arbitrum-one.activity]
+  emitter = "SubgraphAvailabilityManager"
+  event   = "OracleVote(bytes32,bool,uint256,uint256)"
+
+# SAM: InfraDAO
+[[accounts.arbitrum-one]]
+address = "SamOracleInfraDAO"
+group   = "oracles"
+watch   = ["eth"]
+
+  [accounts.arbitrum-one.activity]
+  emitter = "SubgraphAvailabilityManager"
+  event   = "OracleVote(bytes32,bool,uint256,uint256)"
+
+# SAM: Semiotic
+[[accounts.arbitrum-one]]
+address = "SamOracleSemiotic"
+group   = "oracles"
+watch   = ["eth"]
+
+  [accounts.arbitrum-one.activity]
+  emitter = "SubgraphAvailabilityManager"
+  event   = "OracleVote(bytes32,bool,uint256,uint256)"
+
+# ---------------------------------------------------------------------------------------
+# Remediation
+# ---------------------------------------------------------------------------------------
+#
+# Nothing ships enabled. A `remediate` block is the ONE threshold the tool holds, and it
+# exists because repair must keep working when the metrics pipeline does not. Note that it
+# is deliberately not the alert threshold: top up early, page only if the top-up is not
+# keeping up.
+#
+#   [accounts.arbitrum-one.eth.remediate]
+#   below     = "0.05"
+#   top_up_by = "0.1"
+#   from      = "FoundationBillingMultisig"

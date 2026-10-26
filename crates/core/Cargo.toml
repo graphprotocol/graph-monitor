@@ -1,0 +1,20 @@
+[package]
+name = "graph-network-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core config, RPC access and domain logic for the graph-network CLI"
+
+[dependencies]
+alloy.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+futures.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+toml.workspace = true
+tracing.workspace = true

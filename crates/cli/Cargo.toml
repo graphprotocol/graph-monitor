@@ -1,0 +1,25 @@
+[package]
+name = "graph-network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A CLI for gaining insight into Graph Protocol state"
+
+[[bin]]
+name = "graph-network"
+path = "src/main.rs"
+
+[dependencies]
+graph-network-core = { path = "../core" }
+
+alloy.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+prometheus.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["net", "signal", "time"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
