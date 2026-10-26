@@ -1,5 +1,5 @@
 [package]
-name = "graph-network"
+name = "graph-monitor"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,11 +8,11 @@ repository.workspace = true
 description = "A CLI for gaining insight into Graph Protocol state"
 
 [[bin]]
-name = "graph-network"
+name = "graph-monitor"
 path = "src/main.rs"
 
 [dependencies]
-graph-network-core = { path = "../core" }
+graph-monitor-core = { path = "../core" }
 
 alloy.workspace = true
 anyhow.workspace = true

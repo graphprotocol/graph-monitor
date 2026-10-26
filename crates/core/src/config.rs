@@ -2,8 +2,8 @@
 //!
 //! Layers, later wins:
 //!   1. the shipped `config/default.toml`, embedded at build time
-//!   2. `$XDG_CONFIG_HOME/graph-network/config.toml`
-//!   3. `./graph-network.toml`
+//!   2. `$XDG_CONFIG_HOME/graph-monitor/config.toml`
+//!   3. `./graph-monitor.toml`
 //!   4. environment / flags (applied by the caller)
 //!
 //! User config *extends* the shipped layer rather than replacing it. `use_defaults = false`
@@ -701,9 +701,9 @@ impl Resolved {
 fn default_user_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(dir) = dirs::config_dir() {
-        paths.push(dir.join("graph-network").join("config.toml"));
+        paths.push(dir.join("graph-monitor").join("config.toml"));
     }
-    paths.push(PathBuf::from("graph-network.toml"));
+    paths.push(PathBuf::from("graph-monitor.toml"));
     paths
 }
 

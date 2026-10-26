@@ -6,9 +6,9 @@
 use std::collections::BTreeMap;
 
 use alloy::primitives::Address;
-use graph_network_core::engine::CycleReport;
-use graph_network_core::watch::{Measurement, Reading};
-use graph_network_core::watches::{
+use graph_monitor_core::engine::CycleReport;
+use graph_monitor_core::watch::{Measurement, Reading};
+use graph_monitor_core::watches::{
     humanize, M_ALLOWANCE, M_ALLOWANCE_UNLIMITED, M_ETH_BALANCE, M_GRT_BALANCE, M_IDLE_SECONDS,
 };
 use serde_json::{json, Value};
@@ -425,10 +425,10 @@ pub fn json(report: &CycleReport) -> Value {
 mod tests {
     use super::*;
     use alloy::primitives::U256;
-    use graph_network_core::rpc::PinnedBlock;
-    use graph_network_core::source::{SourceHealth, SourceId};
-    use graph_network_core::units::Amount;
-    use graph_network_core::watch::{Asset, Labels, Observation, RemediationIntent, Unit, WatchId};
+    use graph_monitor_core::rpc::PinnedBlock;
+    use graph_monitor_core::source::{SourceHealth, SourceId};
+    use graph_monitor_core::units::Amount;
+    use graph_monitor_core::watch::{Asset, Labels, Observation, RemediationIntent, Unit, WatchId};
     use std::time::Duration;
 
     fn amount(v: u64) -> Amount {

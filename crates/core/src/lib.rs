@@ -1,4 +1,4 @@
-//! Core logic for the `graph-network` CLI: config, sources, reads, checks, and the engine
+//! Core logic for the `graph-monitor` CLI: config, sources, reads, checks, and the engine
 //! that runs them.
 //!
 //! This crate returns typed values and never formats output. Rendering lives in the binary,

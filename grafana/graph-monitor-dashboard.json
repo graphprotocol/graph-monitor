@@ -1,10 +1,10 @@
 {
   "title": "Graph Network",
-  "uid": "graph-network",
-  "description": "Public-view health of Graph Protocol components, exported by graph-network. Nothing here is graded by the tool: it reports what it read, and this dashboard (and its alert rules) decide what is acceptable.",
+  "uid": "graph-monitor",
+  "description": "Public-view health of Graph Protocol components, exported by graph-monitor. Nothing here is graded by the tool: it reports what it read, and this dashboard (and its alert rules) decide what is acceptable.",
   "tags": [
     "graph",
-    "graph-network"
+    "graph-monitor"
   ],
   "timezone": "browser",
   "schemaVersion": 39,
@@ -49,7 +49,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gn_source_up{network=\"$network\"}",
+          "expr": "gm_source_up{network=\"$network\"}",
           "refId": "A",
           "range": false,
           "instant": true
@@ -122,7 +122,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "time() - gn_cycle_last_success_timestamp",
+          "expr": "time() - gm_cycle_last_success_timestamp",
           "refId": "A",
           "range": false,
           "instant": true
@@ -188,7 +188,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(gn_read_unknown{network=\"$network\", group=~\"$group\", account=~\"$account\"})",
+          "expr": "sum(gm_read_unknown{network=\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "A",
           "range": false,
           "instant": true
@@ -249,7 +249,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gn_source_lag_seconds{network=\"$network\"}",
+          "expr": "gm_source_lag_seconds{network=\"$network\"}",
           "refId": "A",
           "range": false,
           "instant": true
@@ -314,7 +314,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gn_block_height{network=\"$network\"}",
+          "expr": "gm_block_height{network=\"$network\"}",
           "refId": "A",
           "range": false,
           "instant": true
@@ -371,7 +371,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gn_build_info",
+          "expr": "gm_build_info",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -441,7 +441,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gn_account_eth_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "gm_account_eth_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -453,7 +453,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gn_account_grt_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "gm_account_grt_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
           "refId": "B",
           "range": false,
           "instant": true,
@@ -465,7 +465,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gn_account_idle_seconds{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "gm_account_idle_seconds{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
           "refId": "C",
           "range": false,
           "instant": true,
@@ -477,7 +477,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gn_account_activity_seen{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "gm_account_activity_seen{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
           "refId": "D",
           "range": false,
           "instant": true,
@@ -669,7 +669,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gn_account_eth_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "gm_account_eth_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -681,7 +681,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gn_account_remediation_below{network=\"$network\", asset=\"eth\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "gm_account_remediation_below{network=\"$network\", asset=\"eth\", group=~\"$group\", account=~\"$account\"}",
           "refId": "B",
           "range": true,
           "instant": false,
@@ -782,7 +782,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gn_account_grt_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "gm_account_grt_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -794,7 +794,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gn_account_remediation_below{network=\"$network\", asset=\"grt\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "gm_account_remediation_below{network=\"$network\", asset=\"grt\", group=~\"$group\", account=~\"$account\"}",
           "refId": "B",
           "range": true,
           "instant": false,
@@ -907,7 +907,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gn_account_idle_seconds{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "gm_account_idle_seconds{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -978,7 +978,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gn_account_activity_seen{network=\"$network\", group=~\"$group\", account=~\"$account\"} == 0",
+          "expr": "gm_account_activity_seen{network=\"$network\", group=~\"$group\", account=~\"$account\"} == 0",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -1070,7 +1070,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gn_account_allowance_unlimited{network=\"$network\", group=~\"$group\"}",
+          "expr": "gm_account_allowance_unlimited{network=\"$network\", group=~\"$group\"}",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -1082,7 +1082,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gn_account_allowance_exact_max{network=\"$network\", group=~\"$group\"}",
+          "expr": "gm_account_allowance_exact_max{network=\"$network\", group=~\"$group\"}",
           "refId": "B",
           "range": false,
           "instant": true,
@@ -1094,7 +1094,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gn_account_allowance_grt{network=\"$network\", group=~\"$group\"}",
+          "expr": "gm_account_allowance_grt{network=\"$network\", group=~\"$group\"}",
           "refId": "C",
           "range": false,
           "instant": true,
@@ -1285,7 +1285,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (watch) (rate(gn_read_errors_total{network=\"$network\"}[$__rate_interval]))",
+          "expr": "sum by (watch) (rate(gm_read_errors_total{network=\"$network\"}[$__rate_interval]))",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -1356,7 +1356,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(gn_cycle_duration_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(gm_cycle_duration_seconds_bucket[$__rate_interval])))",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -1368,7 +1368,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(gn_cycle_duration_seconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(gm_cycle_duration_seconds_bucket[$__rate_interval])))",
           "refId": "B",
           "range": true,
           "instant": false,
@@ -1439,7 +1439,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le, watch) (rate(gn_read_duration_seconds_bucket{network=\"$network\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, watch) (rate(gm_read_duration_seconds_bucket{network=\"$network\"}[$__rate_interval])))",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -1522,7 +1522,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (outcome, account) (increase(gn_remediation_total{network=\"$network\"}[$__rate_interval]))",
+          "expr": "sum by (outcome, account) (increase(gm_remediation_total{network=\"$network\"}[$__rate_interval]))",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -1595,10 +1595,10 @@
         },
         "label": "Network",
         "query": {
-          "query": "label_values(gn_block_height, network)",
+          "query": "label_values(gm_block_height, network)",
           "refId": "network"
         },
-        "definition": "label_values(gn_block_height, network)",
+        "definition": "label_values(gm_block_height, network)",
         "current": {},
         "refresh": 2,
         "includeAll": false,
@@ -1615,10 +1615,10 @@
         },
         "label": "Group",
         "query": {
-          "query": "label_values(gn_account_eth_balance{network=\"$network\"}, group)",
+          "query": "label_values(gm_account_eth_balance{network=\"$network\"}, group)",
           "refId": "group"
         },
-        "definition": "label_values(gn_account_eth_balance{network=\"$network\"}, group)",
+        "definition": "label_values(gm_account_eth_balance{network=\"$network\"}, group)",
         "current": {},
         "refresh": 2,
         "includeAll": true,
@@ -1636,10 +1636,10 @@
         },
         "label": "Account",
         "query": {
-          "query": "label_values(gn_account_eth_balance{network=\"$network\", group=~\"$group\"}, account)",
+          "query": "label_values(gm_account_eth_balance{network=\"$network\", group=~\"$group\"}, account)",
           "refId": "account"
         },
-        "definition": "label_values(gn_account_eth_balance{network=\"$network\", group=~\"$group\"}, account)",
+        "definition": "label_values(gm_account_eth_balance{network=\"$network\", group=~\"$group\"}, account)",
         "current": {},
         "refresh": 2,
         "includeAll": true,

@@ -2145,14 +2145,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
-name = "graph-network"
+name = "graph-monitor"
 version = "0.1.0"
 dependencies = [
  "alloy",
  "anyhow",
  "axum",
  "clap",
- "graph-network-core",
+ "graph-monitor-core",
  "prometheus",
  "serde_json",
  "tokio",
@@ -2161,7 +2161,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "graph-network-core"
+name = "graph-monitor-core"
 version = "0.1.0"
 dependencies = [
  "alloy",
