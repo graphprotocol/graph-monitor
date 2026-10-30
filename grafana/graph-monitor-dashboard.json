@@ -49,7 +49,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gm_source_up{network=\"$network\"}",
+          "expr": "max(gm_source_up{network=\"$network\", source=~\"rpc:.*\"})",
           "refId": "A",
           "range": false,
           "instant": true
@@ -122,7 +122,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "time() - gm_cycle_last_success_timestamp",
+          "expr": "max(time() - gm_cycle_last_success_timestamp)",
           "refId": "A",
           "range": false,
           "instant": true
@@ -249,7 +249,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gm_source_lag_seconds{network=\"$network\"}",
+          "expr": "max(gm_source_lag_seconds{network=\"$network\", source=~\"rpc:.*\"})",
           "refId": "A",
           "range": false,
           "instant": true
@@ -314,7 +314,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gm_block_height{network=\"$network\"}",
+          "expr": "max(gm_block_height{network=\"$network\"})",
           "refId": "A",
           "range": false,
           "instant": true
@@ -371,11 +371,11 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gm_build_info",
+          "expr": "max by (version) (gm_build_info)",
           "refId": "A",
           "range": false,
           "instant": true,
-          "format": "table"
+          "legendFormat": "{{version}}"
         }
       ],
       "options": {
@@ -441,7 +441,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gm_account_eth_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "max by (group, account, address) (gm_account_eth_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -453,7 +453,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gm_account_grt_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "max by (group, account, address) (gm_account_grt_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "B",
           "range": false,
           "instant": true,
@@ -465,7 +465,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gm_account_idle_seconds{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "max by (group, account, address) (gm_account_idle_seconds{network=\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "C",
           "range": false,
           "instant": true,
@@ -477,7 +477,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gm_account_activity_seen{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "max by (group, account, address) (gm_account_activity_seen{network=\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "D",
           "range": false,
           "instant": true,
@@ -487,49 +487,33 @@
       "description": "One row per watched account. Blank cells mean that asset is not watched for that account \u2014 not that it is zero.",
       "transformations": [
         {
-          "id": "joinByField",
-          "options": {
-            "byField": "account",
-            "mode": "outer"
-          }
+          "id": "merge",
+          "options": {}
         },
         {
           "id": "organize",
           "options": {
             "excludeByName": {
-              "Time": true,
-              "Time 1": true,
-              "Time 2": true,
-              "Time 3": true,
-              "Time 4": true,
-              "__name__": true,
-              "__name__ 1": true,
-              "__name__ 2": true,
-              "__name__ 3": true,
-              "__name__ 4": true,
-              "job": true,
-              "instance": true,
-              "network": true,
-              "network 1": true,
-              "network 2": true,
-              "network 3": true,
-              "network 4": true,
-              "address 2": true,
-              "address 3": true,
-              "address 4": true,
-              "group 2": true,
-              "group 3": true,
-              "group 4": true
+              "Time": true
             },
             "renameByName": {
-              "group 1": "Group",
-              "address 1": "Address",
+              "group": "Group",
+              "account": "Account",
+              "address": "Address",
               "Value #A": "ETH",
               "Value #B": "GRT",
               "Value #C": "Idle",
               "Value #D": "Seen"
             },
-            "indexByName": {}
+            "indexByName": {
+              "group": 0,
+              "account": 1,
+              "address": 2,
+              "Value #A": 3,
+              "Value #B": 4,
+              "Value #C": 5,
+              "Value #D": 6
+            }
           }
         }
       ],
@@ -669,7 +653,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gm_account_eth_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "max by (account) (gm_account_eth_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -681,7 +665,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gm_account_remediation_below{network=\"$network\", asset=\"eth\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "max by (account) (gm_account_remediation_below{network=\"$network\", asset=\"eth\", group=~\"$group\", account=~\"$account\"})",
           "refId": "B",
           "range": true,
           "instant": false,
@@ -782,7 +766,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gm_account_grt_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "max by (account) (gm_account_grt_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -794,7 +778,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gm_account_remediation_below{network=\"$network\", asset=\"grt\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "max by (account) (gm_account_remediation_below{network=\"$network\", asset=\"grt\", group=~\"$group\", account=~\"$account\"})",
           "refId": "B",
           "range": true,
           "instant": false,
@@ -907,7 +891,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gm_account_idle_seconds{network=\"$network\", group=~\"$group\", account=~\"$account\"}",
+          "expr": "max by (account) (gm_account_idle_seconds{network=\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -978,7 +962,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gm_account_activity_seen{network=\"$network\", group=~\"$group\", account=~\"$account\"} == 0",
+          "expr": "max by (group, account, address) (gm_account_activity_seen{network=\"$network\", group=~\"$group\", account=~\"$account\"}) == 0",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -992,10 +976,6 @@
           "options": {
             "excludeByName": {
               "Time": true,
-              "__name__": true,
-              "job": true,
-              "instance": true,
-              "network": true,
               "Value": true,
               "address": true
             },
@@ -1070,7 +1050,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gm_account_allowance_unlimited{network=\"$network\", group=~\"$group\"}",
+          "expr": "max by (group, owner, spender) (gm_account_allowance_unlimited{network=\"$network\", group=~\"$group\"})",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -1082,7 +1062,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gm_account_allowance_exact_max{network=\"$network\", group=~\"$group\"}",
+          "expr": "max by (group, owner, spender) (gm_account_allowance_exact_max{network=\"$network\", group=~\"$group\"})",
           "refId": "B",
           "range": false,
           "instant": true,
@@ -1094,7 +1074,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "gm_account_allowance_grt{network=\"$network\", group=~\"$group\"}",
+          "expr": "max by (group, owner, spender) (gm_account_allowance_grt{network=\"$network\", group=~\"$group\"})",
           "refId": "C",
           "range": false,
           "instant": true,
@@ -1104,44 +1084,31 @@
       "description": "Use the Unlimited column, not Raw GRT: an unlimited approval is ~1.157e59 and a float cannot represent it faithfully. That column is computed on exact integers.",
       "transformations": [
         {
-          "id": "joinByField",
-          "options": {
-            "byField": "spender",
-            "mode": "outer"
-          }
+          "id": "merge",
+          "options": {}
         },
         {
           "id": "organize",
           "options": {
             "excludeByName": {
-              "Time": true,
-              "Time 1": true,
-              "Time 2": true,
-              "Time 3": true,
-              "__name__": true,
-              "__name__ 1": true,
-              "__name__ 2": true,
-              "__name__ 3": true,
-              "job": true,
-              "instance": true,
-              "network": true,
-              "network 1": true,
-              "network 2": true,
-              "network 3": true,
-              "group 2": true,
-              "group 3": true,
-              "owner 2": true,
-              "owner 3": true
+              "Time": true
             },
             "renameByName": {
-              "owner 1": "Owner",
-              "group 1": "Group",
+              "group": "Group",
+              "owner": "Owner",
               "spender": "Spender",
               "Value #A": "Unlimited",
               "Value #B": "Untouched max",
               "Value #C": "Raw GRT"
             },
-            "indexByName": {}
+            "indexByName": {
+              "group": 0,
+              "owner": 1,
+              "spender": 2,
+              "Value #A": 3,
+              "Value #B": 4,
+              "Value #C": 5
+            }
           }
         }
       ],
@@ -1255,12 +1222,275 @@
     },
     {
       "type": "row",
-      "title": "Tool health",
+      "title": "Subgraphs",
+      "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 40
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Subgraphs now",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 41
+      },
+      "description": "One row per configured subgraph, checked every cycle with a _meta query. Up means it answered, served the expected deployment, reported no indexing errors and was within max_lag. Blank cells mean that number could not be measured this cycle, not that it is zero.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "format": "table",
+          "expr": "max by (source) (gm_source_up{network=\"$network\", source=~\"subgraph:.*\"})"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "refId": "B",
+          "range": false,
+          "instant": true,
+          "format": "table",
+          "expr": "max by (source) (gm_source_blocks_behind{network=\"$network\", source=~\"subgraph:.*\"})"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "refId": "C",
+          "range": false,
+          "instant": true,
+          "format": "table",
+          "expr": "max by (source) (gm_source_lag_seconds{network=\"$network\", source=~\"subgraph:.*\"})"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "refId": "D",
+          "range": false,
+          "instant": true,
+          "format": "table",
+          "expr": "max by (source) (gm_source_block_height{network=\"$network\", source=~\"subgraph:.*\"})"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "source": "Subgraph",
+              "Value #A": "Up",
+              "Value #B": "Blocks behind",
+              "Value #C": "Lag",
+              "Value #D": "Indexed block"
+            },
+            "indexByName": {
+              "source": 0,
+              "Value #A": 1,
+              "Value #B": 2,
+              "Value #C": 3,
+              "Value #D": 4
+            }
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Up"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "down",
+                        "color": "red",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "up",
+                        "color": "green",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Lag"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Blocks behind"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Indexed block"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Subgraph lag",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 41
+      },
+      "description": "How far each subgraph's latest indexed block trails the wall clock. A line that stops means the subgraph could not be read.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "refId": "A",
+          "legendFormat": "{{source}}",
+          "expr": "max by (source) (gm_source_lag_seconds{network=\"$network\", source=~\"subgraph:.*\"})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Tool health",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 49
       },
       "collapsed": false,
       "panels": []
@@ -1276,7 +1506,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 41
+        "y": 50
       },
       "targets": [
         {
@@ -1347,7 +1577,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 41
+        "y": 50
       },
       "targets": [
         {
@@ -1430,7 +1660,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 41
+        "y": 50
       },
       "targets": [
         {
@@ -1497,7 +1727,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 48
+        "y": 57
       },
       "collapsed": false,
       "panels": []
@@ -1513,7 +1743,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 49
+        "y": 58
       },
       "targets": [
         {

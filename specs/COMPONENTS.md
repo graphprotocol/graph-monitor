@@ -117,7 +117,7 @@ component's own dashboard, not in this tool.
 ## Subgraphs
 
 For every specified subgraph deployment and deployment id:
-- ⬜ Reachable. The subgraph answers queries.
-- ⬜ Indexing lag vs chain head. How far behind the chain it is.
+- ✅ Reachable. The subgraph answers queries.
+- ✅ Indexing lag vs chain head. How far behind the chain it is.
 
 Important subgraphs: network, analytics, EBO, QoS

@@ -92,6 +92,33 @@ watch   = ["eth", "grt"]
 The shipped RPC endpoint is the free public one, which rate-limits quickly. Point `rpc_url` at a
 real provider for anything beyond a quick look.
 
+## Subgraphs
+
+Each configured subgraph is checked every cycle with one `_meta` query: does it answer, and how far
+is its latest indexed block behind the chain head. A subgraph is reported down when it does not
+answer, serves a different deployment than the one asked for, reports indexing errors, or
+trails the clock by more than `max_lag` (default 15 minutes). No watch reads from a subgraph, so a
+down subgraph never makes anything else unreadable.
+
+List subgraphs under the network they index; that chain's head is what the block gap is measured
+against. Gateway queries send the API key as a bearer token. Without a key, gateway subgraphs report
+unreadable and everything else runs normally.
+
+```toml
+[gateway]
+api_key = "${GRAPH_API_KEY}"
+
+[[subgraphs.arbitrum-one]]
+label       = "network"
+id          = "<subgraph id>"      # or url = "https://…" for a graph-node
+deployments = ["Qm…", "Qm…"]       # optional, each also checked on its own
+max_lag     = "15m"
+```
+
+The `id` check follows whatever version is published. Each entry in `deployments` is checked
+separately as `network@Qm…`, which covers an upgrade: the new version indexing while the old one
+still serves.
+
 ## Remediation
 
 An account can carry a `remediate` block that tops up its ETH balance when it falls below a

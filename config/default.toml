@@ -164,3 +164,46 @@ watch   = ["eth"]
 #   below     = "0.05"
 #   top_up_by = "0.1"
 #   from      = "FoundationBillingMultisig"
+
+# ---------------------------------------------------------------------------------------
+# Subgraphs
+# ---------------------------------------------------------------------------------------
+# Gateway API key, read from the environment. Without it, gateway subgraphs report
+# unreadable and everything else still runs.
+#
+# Can be set in user config file.
+# [gateway]
+# api_key = "${GRAPH_API_KEY}"
+
+# Each entry below is checked every cycle: does it answer, and how far behind the chain is
+# it. List a subgraph under the network it indexes.
+#
+# Point each entry at its subgraph with ONE of:
+#   id  = "…"           the subgraph id; follows whatever version is currently published
+#   url = "https://…"   any GraphQL endpoint, e.g. your own graph-node
+#
+# Optional:
+#   deployments = ["Qm…", …]  specific deployments of this subgraph, each checked on its
+#                             own as well (needs `id`). Useful during an upgrade, while
+#                             the new version indexes and the old one still serves.
+#   max_lag = "15m"           the default; how stale it may get before it is down
+# TODO: fill in the ids and uncomment.
+
+[[subgraphs.arbitrum-one]]
+label = "network"
+id    = "DZz4kDTdmzWLWsV373w2bSmoar3umKKH9y82SUKr5qmp"
+deployments = [
+    "QmW7D31nx3Fp6HsHfzr61STbiZ6MCoj3XBofGQGah9VNT5",   # v2.3.3
+    "QmatH4cd25ymsfCFpgKPRQQ7uCYNgarxanVQ9WCfg4Y7TZ"    # v2.3.2
+]
+[[subgraphs.arbitrum-one]]
+label = "analytics"
+id    = "AgV4u2z1BFZKSj4Go1AdQswUGW2FcAtnPhifd4V7NLVz"
+
+[[subgraphs.arbitrum-one]]
+label = "ebo"
+id    = "4KFYqUWRTZQ9gn7GPHC6YQ2q15chJfVrX43ezYcwkgxB"
+
+[[subgraphs.arbitrum-one]]
+label = "qos"
+id    = "Dtr9rETvwokot4BSXaD5tECanXfqfJKcvHuaaEgPDD2D"

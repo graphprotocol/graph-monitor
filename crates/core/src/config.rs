@@ -24,6 +24,14 @@ use crate::units::DecimalStr;
 /// scan stops at the first hit, so it costs nothing for an account that is actually active.
 const DEFAULT_ACTIVITY_LOOKBACK: Duration = Duration::from_secs(7 * 86_400);
 
+/// How far behind wall clock a subgraph's latest block may be before it is called stale.
+/// Looser than an RPC's allowance: indexing trails the head by design, and a gateway picks
+/// among indexers that are each a little behind.
+const DEFAULT_SUBGRAPH_MAX_LAG: Duration = Duration::from_secs(15 * 60);
+
+/// The decentralized network's gateway. Queries carry the API key as a bearer token.
+const DEFAULT_GATEWAY_URL: &str = "https://gateway.thegraph.com/api";
+
 /// The config shipped inside the binary. Committed at `config/default.toml`.
 pub const DEFAULT_CONFIG: &str = include_str!("../../../config/default.toml");
 
@@ -58,6 +66,35 @@ struct RawConfig {
     /// Keyed by network name: `[[accounts.arbitrum-one]]`.
     #[serde(default)]
     accounts: BTreeMap<String, Vec<RawAccount>>,
+    gateway: Option<RawGateway>,
+    /// Keyed by network name: `[[subgraphs.arbitrum-one]]`. The network is the chain the
+    /// subgraph indexes, which is what its lag is measured against.
+    #[serde(default)]
+    subgraphs: BTreeMap<String, Vec<RawSubgraph>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGateway {
+    url: Option<String>,
+    /// `${ENV}` works here, so it need not be a literal.
+    api_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSubgraph {
+    label: String,
+    /// Subgraph id: follows whichever deployment is currently published.
+    id: Option<String>,
+    /// Deployment ids (`Qm…`) of this subgraph, each checked on its own, e.g. the version
+    /// being upgraded to while the published one still serves.
+    #[serde(default)]
+    deployments: Vec<String>,
+    /// Any GraphQL endpoint, e.g. a graph-node directly. No API key is sent.
+    url: Option<String>,
+    max_lag: Option<String>,
+    enabled: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -188,11 +225,30 @@ pub struct Account {
     pub source: Source,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct Gateway {
+    pub url: Option<String>,
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Subgraph {
+    pub label: String,
+    pub id: Option<String>,
+    pub deployments: Vec<String>,
+    pub url: Option<String>,
+    pub max_lag: Option<String>,
+    pub enabled: bool,
+    pub source: Source,
+}
+
 #[derive(Debug, Default)]
 pub struct Config {
     pub default_network: Option<String>,
     pub networks: BTreeMap<String, Network>,
     pub accounts: BTreeMap<String, Vec<Account>>,
+    pub gateway: Gateway,
+    pub subgraphs: BTreeMap<String, Vec<Subgraph>>,
     /// Human-readable list of the layers actually loaded, for error messages.
     pub sources: Vec<String>,
     pub used_defaults: bool,
@@ -345,6 +401,46 @@ impl Config {
                     source,
                 };
 
+                match existing.iter_mut().find(|e| e.label == merged.label) {
+                    Some(slot) => *slot = merged,
+                    None => existing.push(merged),
+                }
+            }
+        }
+
+        if let Some(g) = raw.gateway {
+            if let Some(url) = g.url {
+                self.gateway.url = Some(url);
+            }
+            if let Some(key) = g.api_key {
+                self.gateway.api_key = Some(key);
+            }
+        }
+
+        // Subgraphs extend and override by label, the same way accounts do.
+        for (network, subgraphs) in raw.subgraphs {
+            let mut seen_in_layer: Vec<String> = Vec::new();
+            let existing = self.subgraphs.entry(network.clone()).or_default();
+
+            for sg in subgraphs {
+                if seen_in_layer.contains(&sg.label) {
+                    return Err(ConfigError::DuplicateLabel {
+                        network,
+                        label: sg.label,
+                    }
+                    .into());
+                }
+                seen_in_layer.push(sg.label.clone());
+
+                let merged = Subgraph {
+                    label: sg.label,
+                    id: sg.id,
+                    deployments: sg.deployments,
+                    url: sg.url,
+                    max_lag: sg.max_lag,
+                    enabled: sg.enabled.unwrap_or(true),
+                    source,
+                };
                 match existing.iter_mut().find(|e| e.label == merged.label) {
                     Some(slot) => *slot = merged,
                     None => existing.push(merged),
@@ -526,6 +622,8 @@ impl Config {
             None => None,
         };
 
+        let subgraphs = self.resolve_subgraphs(&name)?;
+
         Ok(Resolved {
             network: name,
             chain_id,
@@ -538,9 +636,121 @@ impl Config {
             max_lag,
             addresses,
             accounts: resolved_accounts,
+            subgraphs,
             sources: self.sources.clone(),
             used_defaults: self.used_defaults,
         })
+    }
+
+    /// Subgraphs indexing `network`, enabled ones only.
+    ///
+    /// An unset `${GRAPH_API_KEY}` is not a config error here. The shipped config may list
+    /// subgraphs, and someone checking balances without a key should still be able to; those
+    /// subgraphs report unreadable and say why.
+    fn resolve_subgraphs(&self, network: &str) -> Result<Vec<ResolvedSubgraph>> {
+        let base = self
+            .gateway
+            .url
+            .clone()
+            .unwrap_or_else(|| DEFAULT_GATEWAY_URL.to_string());
+        let base = expand_env(&base, "gateway.url")?;
+        let base = base.trim_end_matches('/');
+
+        let api_key = match &self.gateway.api_key {
+            Some(raw) => expand_env(raw, "gateway.api_key")
+                .map(crate::subgraph::Secret::new)
+                .map_err(|e| e.to_string()),
+            None => Err("no gateway.api_key configured".to_string()),
+        };
+
+        let mut out = Vec::new();
+        for sg in self.subgraphs.get(network).into_iter().flatten() {
+            if !sg.enabled {
+                continue;
+            }
+            let field = format!("subgraphs.{network}.{}", sg.label);
+
+            if sg.id.is_some() == sg.url.is_some() {
+                return Err(ConfigError::InvalidValue {
+                    field,
+                    value: "id and url".to_string(),
+                    reason: "set exactly one of id or url".to_string(),
+                }
+                .into());
+            }
+            if sg.url.is_some() && !sg.deployments.is_empty() {
+                return Err(ConfigError::InvalidValue {
+                    field: format!("{field}.deployments"),
+                    value: sg.deployments.join(", "),
+                    reason: "deployments are queried through the gateway, so they need `id`, \
+                             not `url`"
+                        .to_string(),
+                }
+                .into());
+            }
+            for (i, d) in sg.deployments.iter().enumerate() {
+                let reason = if !d.starts_with("Qm") {
+                    Some("a deployment id starts with Qm; the subgraph id goes in `id`")
+                } else if sg.deployments[..i].contains(d) {
+                    Some("listed twice")
+                } else {
+                    None
+                };
+                if let Some(reason) = reason {
+                    return Err(ConfigError::InvalidValue {
+                        field: format!("{field}.deployments"),
+                        value: d.clone(),
+                        reason: reason.to_string(),
+                    }
+                    .into());
+                }
+            }
+
+            let max_lag = match &sg.max_lag {
+                Some(raw) => parse_duration(raw, &format!("{field}.max_lag"))?,
+                None => DEFAULT_SUBGRAPH_MAX_LAG,
+            };
+
+            let gateway = |path: String| {
+                api_key
+                    .clone()
+                    .map(|key| crate::subgraph::Endpoint {
+                        url: format!("{base}/{path}"),
+                        bearer: Some(key),
+                    })
+                    .map_err(|reason| format!("{reason} (needed for the gateway)"))
+            };
+
+            // The subgraph itself: whatever version is published, or a direct endpoint.
+            let endpoint = match (&sg.id, &sg.url) {
+                (Some(id), _) => gateway(format!("subgraphs/id/{id}")),
+                (_, Some(url)) => expand_env(url, &format!("{field}.url"))
+                    .map(|url| crate::subgraph::Endpoint { url, bearer: None })
+                    .map_err(|e| e.to_string()),
+                _ => unreachable!("exactly one target was checked above"),
+            };
+            out.push(ResolvedSubgraph {
+                label: sg.label.clone(),
+                subgraph: sg.label.clone(),
+                endpoint,
+                expected_deployment: None,
+                max_lag,
+                source: sg.source,
+            });
+
+            // Then each listed deployment, checked on its own under the same umbrella.
+            for d in &sg.deployments {
+                out.push(ResolvedSubgraph {
+                    label: format!("{}@{d}", sg.label),
+                    subgraph: sg.label.clone(),
+                    endpoint: gateway(format!("deployments/id/{d}")),
+                    expected_deployment: Some(d.clone()),
+                    max_lag,
+                    source: sg.source,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// Network name for a chain id, used to make chain-id mismatches legible.
@@ -610,6 +820,19 @@ impl ResolvedAccount {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ResolvedSubgraph {
+    /// Unique per check: `network` for the subgraph itself, `network@Qm…` for a deployment.
+    pub label: String,
+    /// The configured entry this check came from.
+    pub subgraph: String,
+    /// The query endpoint, or why there is none.
+    pub endpoint: std::result::Result<crate::subgraph::Endpoint, String>,
+    pub expected_deployment: Option<String>,
+    pub max_lag: Duration,
+    pub source: Source,
+}
+
 #[derive(Clone)]
 pub struct Resolved {
     pub network: String,
@@ -624,6 +847,7 @@ pub struct Resolved {
     pub max_lag: Duration,
     pub addresses: BTreeMap<String, Address>,
     pub accounts: Vec<ResolvedAccount>,
+    pub subgraphs: Vec<ResolvedSubgraph>,
     pub sources: Vec<String>,
     pub used_defaults: bool,
 }
@@ -640,6 +864,7 @@ impl std::fmt::Debug for Resolved {
                 &self.signer_key.as_ref().map(|_| "<redacted>"),
             )
             .field("accounts", &self.accounts.len())
+            .field("subgraphs", &self.subgraphs.len())
             .finish()
     }
 }
@@ -1214,6 +1439,158 @@ rpc_url = "http://localhost:8545"
         let resolved = config.resolve(None, None).unwrap();
         let err = resolved.require_accounts().unwrap_err().to_string();
         assert!(err.contains("empty-net"), "{err}");
+    }
+
+    #[test]
+    fn a_subgraph_id_queries_the_gateway_with_the_key_as_a_bearer() {
+        let config = load(
+            r#"
+[gateway]
+api_key = "literal-key"
+
+[[subgraphs.arbitrum-one]]
+label = "network"
+id = "SubgraphIdAbc"
+
+[[subgraphs.arbitrum-one]]
+label = "ebo"
+id = "EboId"
+deployments = ["QmDeploymentXyz"]
+max_lag = "5m"
+
+[[subgraphs.arbitrum-one]]
+label = "local"
+url = "http://graph-node:8000/subgraphs/name/x"
+"#,
+        );
+        let subgraphs = config.resolve(None, None).unwrap().subgraphs;
+        assert_eq!(subgraphs.len(), 4);
+
+        let network = subgraphs[0].endpoint.as_ref().unwrap();
+        assert_eq!(
+            network.url,
+            "https://gateway.thegraph.com/api/subgraphs/id/SubgraphIdAbc"
+        );
+        // The key never goes into the URL.
+        assert!(!network.url.contains("literal-key"));
+        assert!(network.bearer.is_some());
+        assert_eq!(subgraphs[0].max_lag, DEFAULT_SUBGRAPH_MAX_LAG);
+
+        let deployment = &subgraphs[2];
+        assert!(deployment
+            .endpoint
+            .as_ref()
+            .unwrap()
+            .url
+            .ends_with("/deployments/id/QmDeploymentXyz"));
+        assert_eq!(
+            deployment.expected_deployment.as_deref(),
+            Some("QmDeploymentXyz")
+        );
+        assert_eq!(deployment.max_lag, Duration::from_secs(300));
+
+        // A direct endpoint gets no key: it is not the gateway's to receive.
+        assert!(subgraphs[3].endpoint.as_ref().unwrap().bearer.is_none());
+    }
+
+    #[test]
+    fn a_missing_api_key_makes_gateway_subgraphs_unusable_not_the_config() {
+        let config = load(
+            r#"
+[gateway]
+api_key = "${GRAPH_MONITOR_TEST_UNSET_KEY}"
+
+[[subgraphs.arbitrum-one]]
+label = "network"
+id = "SubgraphIdAbc"
+"#,
+        );
+        // Balances must still be checkable without a gateway key.
+        let resolved = config.resolve(None, None).unwrap();
+        let err = resolved.subgraphs[0].endpoint.as_ref().unwrap_err();
+        assert!(err.contains("GRAPH_MONITOR_TEST_UNSET_KEY"), "{err}");
+    }
+
+    #[test]
+    fn a_subgraph_needs_exactly_one_target() {
+        for body in [
+            "label = \"x\"",
+            "label = \"x\"\nid = \"a\"\nurl = \"http://b\"",
+        ] {
+            let config = load(&format!("[[subgraphs.arbitrum-one]]\n{body}\n"));
+            let err = config.resolve(None, None).unwrap_err().to_string();
+            assert!(err.contains("exactly one"), "{err}");
+        }
+    }
+
+    #[test]
+    fn deployments_expand_under_their_subgraph() {
+        let config = load(
+            r#"
+[[subgraphs.arbitrum-one]]
+label = "network"
+id = "NetworkId"
+deployments = ["QmOne", "QmTwo"]
+"#,
+        );
+        let subgraphs = config.resolve(None, None).unwrap().subgraphs;
+        let labels: Vec<&str> = subgraphs.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, ["network", "network@QmOne", "network@QmTwo"]);
+        assert!(subgraphs.iter().all(|s| s.subgraph == "network"));
+        // The subgraph id follows whatever is published, so nothing is pinned for it.
+        assert_eq!(subgraphs[0].expected_deployment, None);
+        assert_eq!(subgraphs[1].expected_deployment.as_deref(), Some("QmOne"));
+    }
+
+    #[test]
+    fn bad_deployment_lists_are_rejected() {
+        for (body, expect) in [
+            // A subgraph id pasted into the deployment list.
+            (
+                "id = \"N\"\ndeployments = [\"DZz4kDTdmzWLWsV373w2bSmoar3umKKH9y82SUKr5qmp\"]",
+                "starts with Qm",
+            ),
+            (
+                "id = \"N\"\ndeployments = [\"QmA\", \"QmA\"]",
+                "listed twice",
+            ),
+            ("url = \"http://n\"\ndeployments = [\"QmA\"]", "need `id`"),
+        ] {
+            let config = load(&format!(
+                "[[subgraphs.arbitrum-one]]\nlabel = \"network\"\n{body}\n"
+            ));
+            let err = config.resolve(None, None).unwrap_err().to_string();
+            assert!(err.contains(expect), "{err}");
+        }
+    }
+
+    #[test]
+    fn user_subgraphs_override_by_label_and_can_be_disabled() {
+        let config = Config::from_layers(&[
+            (
+                "<defaults>",
+                &format!(
+                    "{DEFAULTS}\n[[subgraphs.arbitrum-one]]\nlabel = \"network\"\nid = \"Shipped\"\n\
+                     [[subgraphs.arbitrum-one]]\nlabel = \"qos\"\nid = \"Q\"\n"
+                ),
+                Source::Default,
+            ),
+            (
+                "<user>",
+                "[[subgraphs.arbitrum-one]]\nlabel = \"network\"\nid = \"Mine\"\n\
+                 [[subgraphs.arbitrum-one]]\nlabel = \"qos\"\nid = \"Q\"\nenabled = false\n",
+                Source::User,
+            ),
+        ])
+        .unwrap();
+        let subgraphs = config.resolve(None, None).unwrap().subgraphs;
+        assert_eq!(subgraphs.len(), 1);
+        assert_eq!(subgraphs[0].source, Source::User);
+        assert!(subgraphs[0]
+            .endpoint
+            .as_ref()
+            .unwrap_err()
+            .contains("api_key"));
     }
 
     #[test]

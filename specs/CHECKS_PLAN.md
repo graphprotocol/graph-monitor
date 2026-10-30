@@ -129,9 +129,11 @@ Per source, stage 0 asserts:
 | Source | Assertions |
 |---|---|
 | RPC | reachable; `eth_chainId` matches config; head block advancing; head timestamp within `max_lag` of wall clock |
-| Subgraph *(later)* | reachable; correct deployment; `_meta.block` within `max_lag_blocks` of the chain head |
+| Subgraph | reachable; correct deployment (when pinned); no indexing errors; `_meta.block` timestamp within `max_lag` of wall clock. Blocks behind the RPC head is exported, not judged |
 
-Implemented in `crates/core/src/source.rs`. A fourth fault, `StateUnavailable`, was added
+Implemented in `crates/core/src/source.rs` and `crates/core/src/subgraph.rs`. Subgraph lag is
+judged in time rather than blocks: a time limit means the same thing on every chain, and a
+block limit would have to be retuned per chain's block rate. A fourth fault, `StateUnavailable`, was added
 during implementation: a non-archive endpoint serves headers happily and then refuses every
 balance read at a historical block. Those failures are classified by error text and promoted to
 a single source fault, rather than scattering as unrelated unreadable cells.

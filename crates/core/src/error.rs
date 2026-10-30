@@ -146,8 +146,8 @@ pub enum ConfigError {
     },
 
     #[error(
-        "network {network:?} has two accounts labelled {label:?} in the same config layer; \
-         labels must be unique within a network"
+        "network {network:?} has two accounts or two subgraphs labelled {label:?} in the same \
+         config layer; labels must be unique within a network"
     )]
     DuplicateLabel { network: String, label: String },
 

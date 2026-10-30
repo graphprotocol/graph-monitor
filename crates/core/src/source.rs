@@ -11,6 +11,10 @@ impl SourceId {
         SourceId(format!("rpc:{network}"))
     }
 
+    pub fn subgraph(label: &str) -> Self {
+        SourceId(format!("subgraph:{label}"))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -33,6 +37,12 @@ pub enum SourceFault {
     Stale { lag: Duration, max_lag: Duration },
     /// Live, but cannot serve *state* at the requested block.
     StateUnavailable { block: u64, reason: String },
+    /// Not queryable as configured, e.g. no API key. Nothing was attempted.
+    Unconfigured(String),
+    /// The subgraph answers, but from a different deployment than config pins.
+    WrongDeployment { expected: String, actual: String },
+    /// graph-node reports indexing errors, so what it serves may be wrong or frozen.
+    IndexingErrors,
 }
 
 impl SourceFault {
@@ -51,6 +61,11 @@ impl SourceFault {
                 "state at block {block} is not available from this endpoint — reading a \
                  historical block usually needs an archive node ({reason})"
             ),
+            SourceFault::Unconfigured(reason) => format!("not configured: {reason}"),
+            SourceFault::WrongDeployment { expected, actual } => {
+                format!("serving deployment {actual}, config expects {expected}")
+            }
+            SourceFault::IndexingErrors => "subgraph has indexing errors".to_string(),
         }
     }
 }
@@ -64,9 +79,37 @@ pub struct SourceHealth {
     pub head: Option<PinnedBlock>,
     pub lag: Option<Duration>,
     pub fault: Option<SourceFault>,
+    /// Subgraphs only: the deployment that answered.
+    pub deployment: Option<String>,
+    /// Subgraphs only: the latest block indexed. Known even when `head` is not, because the
+    /// block's timestamp can be missing.
+    pub indexed_block: Option<u64>,
+    /// Subgraphs only: blocks between the latest indexed block and the RPC's head.
+    pub blocks_behind: Option<u64>,
 }
 
 impl SourceHealth {
+    /// Nothing known yet.
+    pub fn new(id: SourceId, network: &str) -> Self {
+        Self {
+            id,
+            network: network.to_string(),
+            chain_id: None,
+            head: None,
+            lag: None,
+            fault: None,
+            deployment: None,
+            indexed_block: None,
+            blocks_behind: None,
+        }
+    }
+
+    /// The height this source is at: the chain head for an RPC, the latest indexed block for
+    /// a subgraph.
+    pub fn block_height(&self) -> Option<u64> {
+        self.indexed_block.or(self.head.map(|h| h.number))
+    }
+
     pub fn is_up(&self) -> bool {
         self.fault.is_none()
     }
@@ -104,14 +147,7 @@ impl RpcSource {
 
     /// Reachable, the right chain, and current.
     pub async fn verify(&self, client: &Client, now_unix: u64) -> SourceHealth {
-        let mut health = SourceHealth {
-            id: self.id.clone(),
-            network: self.network.clone(),
-            chain_id: None,
-            head: None,
-            lag: None,
-            fault: None,
-        };
+        let mut health = SourceHealth::new(self.id.clone(), &self.network);
 
         let actual = match client.chain_id().await {
             Ok(id) => id,
@@ -172,8 +208,6 @@ mod tests {
 
     fn health_with(lag: Option<Duration>, fault: Option<SourceFault>) -> SourceHealth {
         SourceHealth {
-            id: SourceId::rpc("arbitrum-one"),
-            network: "arbitrum-one".into(),
             chain_id: Some(42161),
             head: Some(PinnedBlock {
                 number: 100,
@@ -181,6 +215,7 @@ mod tests {
             }),
             lag,
             fault,
+            ..SourceHealth::new(SourceId::rpc("arbitrum-one"), "arbitrum-one")
         }
     }
 

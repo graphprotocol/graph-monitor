@@ -58,6 +58,7 @@ pub struct Metrics {
     pub source_up: IntGaugeVec,
     pub source_lag_seconds: GaugeVec,
     pub source_block_height: IntGaugeVec,
+    pub source_blocks_behind: IntGaugeVec,
 
     // Remediation.
     pub remediation_threshold: GaugeVec,
@@ -181,7 +182,16 @@ impl Metrics {
             .unwrap(),
             source_block_height: register_int_gauge_vec!(
                 "gm_source_block_height",
-                "Head block height reported by the source",
+                "Head block height reported by the source. For a subgraph, the latest block \
+                 it has indexed",
+                &["network", "source"]
+            )
+            .unwrap(),
+            source_blocks_behind: register_int_gauge_vec!(
+                "gm_source_blocks_behind",
+                "Subgraphs only: blocks between the latest indexed block and the RPC's head. \
+                 Absent when the RPC failed verification, since there is no head to measure \
+                 against",
                 &["network", "source"]
             )
             .unwrap(),
@@ -246,18 +256,32 @@ impl Metrics {
 
         let net = report.network.as_str();
 
-        self.source_up
-            .with_label_values(&[net, report.source.id.as_str()])
-            .set(i64::from(report.source.is_up()));
-        if let Some(lag) = report.source.lag {
-            self.source_lag_seconds
-                .with_label_values(&[net, report.source.id.as_str()])
-                .set(lag.as_secs_f64());
-        }
-        if let Some(head) = report.source.head {
-            self.source_block_height
-                .with_label_values(&[net, report.source.id.as_str()])
-                .set(head.number as i64);
+        // Reset so a subgraph removed from config stops exporting, and so a lag that could
+        // not be measured this cycle is absent rather than last cycle's number.
+        self.source_up.reset();
+        self.source_lag_seconds.reset();
+        self.source_block_height.reset();
+        self.source_blocks_behind.reset();
+        for source in std::iter::once(&report.source).chain(&report.subgraphs) {
+            let labels = [net, source.id.as_str()];
+            self.source_up
+                .with_label_values(&labels)
+                .set(i64::from(source.is_up()));
+            if let Some(lag) = source.lag {
+                self.source_lag_seconds
+                    .with_label_values(&labels)
+                    .set(lag.as_secs_f64());
+            }
+            if let Some(height) = source.block_height() {
+                self.source_block_height
+                    .with_label_values(&labels)
+                    .set(height as i64);
+            }
+            if let Some(behind) = source.blocks_behind {
+                self.source_blocks_behind
+                    .with_label_values(&labels)
+                    .set(behind as i64);
+            }
         }
         if let Some(block) = report.block {
             self.block_height

@@ -9,7 +9,8 @@ use crate::config::Resolved;
 use crate::error::Result;
 use crate::read::{ReadCtx, ReadPlan};
 use crate::rpc::{BlockSpec, Client, PinnedBlock};
-use crate::source::{RpcSource, SourceFault, SourceHealth};
+use crate::source::{RpcSource, SourceFault, SourceHealth, SourceId};
+use crate::subgraph::SubgraphSource;
 use crate::watch::{DynWatch, Reading};
 use crate::watches;
 
@@ -21,10 +22,18 @@ pub struct CycleReport {
     /// Absent when the source failed verification and nothing could be read.
     pub block: Option<PinnedBlock>,
     pub readings: Vec<Reading>,
+    /// One per configured subgraph. Independent of the watches: no watch reads a subgraph,
+    /// so a subgraph failing makes nothing else unreadable.
+    pub subgraphs: Vec<SourceHealth>,
     pub duration: Duration,
 }
 
 impl CycleReport {
+    /// Subgraphs that failed verification.
+    pub fn subgraphs_down(&self) -> impl Iterator<Item = &SourceHealth> {
+        self.subgraphs.iter().filter(|s| !s.is_up())
+    }
+
     /// Checks that could not be read. Distinct from any value, including zero: an endpoint
     /// outage must never look like an empty wallet.
     pub fn unreadable(&self) -> impl Iterator<Item = &Reading> {
@@ -49,6 +58,8 @@ pub struct Engine {
     pub client: Client,
     pub source: RpcSource,
     checks: Vec<Box<dyn DynWatch>>,
+    subgraphs: Vec<SubgraphSource>,
+    http: alloy::transports::http::reqwest::Client,
 }
 
 impl Engine {
@@ -77,16 +88,45 @@ impl Engine {
         )?;
         let source = RpcSource::new(&config.network, config.chain_id, config.max_lag);
 
+        let subgraphs = config
+            .subgraphs
+            .iter()
+            .map(|sg| SubgraphSource {
+                id: SourceId::subgraph(&sg.label),
+                network: config.network.clone(),
+                endpoint: sg.endpoint.clone(),
+                expected_deployment: sg.expected_deployment.clone(),
+                max_lag: sg.max_lag,
+            })
+            .collect();
+
         Ok(Self {
             config,
             client,
             source,
             checks: all,
+            subgraphs,
+            http: alloy::transports::http::reqwest::Client::new(),
         })
     }
 
     pub fn watch_count(&self) -> usize {
         self.checks.len()
+    }
+
+    pub fn subgraph_count(&self) -> usize {
+        self.subgraphs.len()
+    }
+
+    /// Every subgraph, concurrently. `chain_head` is what lag in blocks is measured against.
+    async fn verify_subgraphs(&self, chain_head: Option<PinnedBlock>) -> Vec<SourceHealth> {
+        let now = now_unix();
+        futures::future::join_all(
+            self.subgraphs
+                .iter()
+                .map(|sg| sg.verify(&self.http, &self.client, chain_head, now)),
+        )
+        .await
     }
 
     /// Every check reports unreadable, attributed to the source fault that prevented reading.
@@ -110,6 +150,7 @@ impl Engine {
             source: health,
             block: None,
             readings,
+            subgraphs: Vec::new(),
             duration: started.elapsed(),
         }
     }
@@ -123,8 +164,29 @@ impl Engine {
         let started = Instant::now();
 
         // ---- stage 0: verify the source ------------------------------------------------
-        let mut health = self.source.verify(&self.client, now_unix()).await;
+        let health = self.source.verify(&self.client, now_unix()).await;
 
+        // A stale RPC head would make every subgraph look closer to current than it is, so
+        // the block gap is only measured against a verified one.
+        let chain_head = health.head.filter(|_| health.is_up());
+
+        // Subgraphs need nothing from the watches, so they verify while the watches read.
+        let (mut report, subgraphs) = tokio::join!(
+            self.read_watches(health, block, started),
+            self.verify_subgraphs(chain_head)
+        );
+        report.subgraphs = subgraphs;
+        report.duration = started.elapsed();
+        report
+    }
+
+    /// Stages 1 and 2 for the watches, given a verified (or failed) source.
+    async fn read_watches(
+        &self,
+        mut health: SourceHealth,
+        block: BlockSpec,
+        started: Instant,
+    ) -> CycleReport {
         // Nothing readable means nothing judgeable. Every check reports Unknown naming the
         // cause, rather than the cycle failing wholesale and reporting nothing at all.
         if !health.is_up() {
@@ -187,6 +249,7 @@ impl Engine {
             source: health,
             block: Some(pinned),
             readings,
+            subgraphs: Vec::new(),
             duration: started.elapsed(),
         }
     }
@@ -202,7 +265,6 @@ fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::SourceId;
     use crate::watch::{Labels, WatchId};
 
     fn outcome(readable: bool) -> Reading {
@@ -224,15 +286,12 @@ mod tests {
             network: "arbitrum-one".into(),
             chain_id: 42161,
             source: SourceHealth {
-                id: SourceId::rpc("arbitrum-one"),
-                network: "arbitrum-one".into(),
                 chain_id: Some(42161),
-                head: None,
-                lag: None,
-                fault: None,
+                ..SourceHealth::new(SourceId::rpc("arbitrum-one"), "arbitrum-one")
             },
             block: None,
             readings,
+            subgraphs: Vec::new(),
             duration: Duration::ZERO,
         }
     }

@@ -149,10 +149,16 @@ async fn run(args: Cli) -> Result<ExitCode> {
         );
     } else if report.unreadable().count() > 0 {
         eprintln!(
-            "note: {} watch(es) could not be read at block {}",
+            "note: {} watch(es) could not be read at block {}:",
             report.unreadable().count(),
             report.block.map(|b| b.number).unwrap_or_default()
         );
+        for line in render::unreadable_notes(&report) {
+            eprintln!("  {line}");
+        }
+    }
+    for sg in report.subgraphs_down() {
+        eprintln!("note: {} is down ({})", sg.id, sg.summary());
     }
 
     for repair in &repairs {
@@ -410,6 +416,7 @@ async fn serve(
         interval_secs,
         metrics_port,
         checks = engine.watch_count(),
+        subgraphs = engine.subgraph_count(),
         "serving"
     );
 
@@ -506,6 +513,15 @@ fn print_config(resolved: &Resolved, cmd: &ConfigCommand, json: bool) -> Result<
                             "allowances": a.allowances.iter().map(|s| s.display.clone()).collect::<Vec<_>>(),
                             "remediates": a.eth_remediate.is_some() || a.grt_remediate.is_some(),
                         })).collect::<Vec<_>>(),
+                        "subgraphs": resolved.subgraphs.iter().map(|s| serde_json::json!({
+                            "label": s.label,
+                            "subgraph": s.subgraph,
+                            "url": s.endpoint.as_ref().ok().map(|e| e.url.clone()),
+                            "unusable": s.endpoint.as_ref().err(),
+                            "deployment": s.expected_deployment,
+                            "max_lag_seconds": s.max_lag.as_secs(),
+                            "source": s.source.as_str(),
+                        })).collect::<Vec<_>>(),
                     }))?
                 );
             } else {
@@ -560,6 +576,29 @@ fn print_config(resolved: &Resolved, cmd: &ConfigCommand, json: bool) -> Result<
                     ]);
                 }
                 print!("{}", table.render());
+
+                if !resolved.subgraphs.is_empty() {
+                    println!();
+                    let mut table = table::Table::new(&[
+                        ("Subgraph", table::Align::Left),
+                        ("Endpoint", table::Align::Left),
+                        ("Max lag", table::Align::Right),
+                        ("From", table::Align::Left),
+                    ]);
+                    for s in &resolved.subgraphs {
+                        table.push(vec![
+                            s.label.clone(),
+                            match &s.endpoint {
+                                // The key travels in a header, so the URL is safe to print.
+                                Ok(e) => e.url.clone(),
+                                Err(reason) => format!("unusable: {reason}"),
+                            },
+                            format!("{}s", s.max_lag.as_secs()),
+                            s.source.as_str().to_string(),
+                        ]);
+                    }
+                    print!("{}", table.render());
+                }
             }
         }
     }

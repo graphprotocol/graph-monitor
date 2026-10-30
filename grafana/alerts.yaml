@@ -1,0 +1,227 @@
+# Alert rules for graph-monitor.
+#
+# Every expression aggregates down to the labels graph-monitor itself emits. Scrape-time
+# labels (pod, container, endpoint, ...) change on every restart, and keeping them would
+# fire or resolve each alert once per pod.
+#
+# Routing: every rule carries `team` and `priority`. The Grafana notification policy and
+# Rootly both route on `team` (Rootly reads $.alerts[0].labels.team), and the policy groups
+# by `priority`. Without `team`, alerts reach Rootly but match no on-call route.
+#   P1 — blind, or money is at risk. Page.
+#   P3 — needs fixing, not now. Ticket.
+#
+# Plain Prometheus rules format: loads in vmalert (-rule), Prometheus, promtool and
+# Grafana's rule import. For a VMRule, put the `groups:` list under `spec:`.
+groups:
+  # -------------------------------------------------------------------------------------
+  # The monitor itself. If these fire, every other rule here is untrustworthy.
+  # -------------------------------------------------------------------------------------
+  - name: graph-monitor.deadman
+    rules:
+      # Not `up == 0`: that needs a series to exist, and a target dropped from service
+      # discovery has none.
+      - alert: GraphMonitorAbsent
+        expr: absent_over_time(gm_build_info[10m])
+        labels:
+          team: Protocol and Network
+          priority: P1
+        annotations:
+          summary: graph-monitor is not being scraped
+          description: No gm_build_info for 10m. The process is down or the scrape target is gone. Every other graph-monitor alert is silent until this is fixed.
+          dashboard: /d/graph-monitor
+
+      # Alive but wedged: scrapes succeed, cycles do not.
+      - alert: GraphMonitorStalled
+        expr: max(time() - gm_cycle_last_success_timestamp) > 600
+        labels:
+          team: Protocol and Network
+          priority: P1
+        annotations:
+          summary: graph-monitor has not completed a cycle in {{ $value | humanizeDuration }}
+          description: The exporter answers scrapes, but no cycle has read anything. Values on the dashboard are stale.
+          dashboard: /d/graph-monitor
+
+      # Assumes --interval 120. Keep the threshold under the interval.
+      - alert: GraphMonitorFallingBehind
+        expr: histogram_quantile(0.95, sum by (le) (rate(gm_cycle_duration_seconds_bucket[15m]))) > 100
+        for: 30m
+        labels:
+          team: Protocol and Network
+          priority: P3
+        annotations:
+          summary: graph-monitor cycle p95 is {{ $value | humanizeDuration }}
+          description: Cycles are close to the polling interval and will start skipping ticks. Raise max_concurrency or use a faster RPC.
+          dashboard: /d/graph-monitor
+
+  # -------------------------------------------------------------------------------------
+  # Blind, rather than unhealthy. The fix is an endpoint, not a wallet. Value alerts below
+  # go quiet when reads fail, because a failed read publishes nothing, so these rules
+  # cover that gap.
+  # -------------------------------------------------------------------------------------
+  - name: graph-monitor.visibility
+    rules:
+      - alert: GraphMonitorSourceDown
+        expr: max by (network, source) (gm_source_up{source=~"rpc:.*"}) == 0
+        for: 5m
+        labels:
+          team: Protocol and Network
+          priority: P1
+        annotations:
+          summary: "{{ $labels.network }} source failed verification"
+          description: The RPC source for {{ $labels.network }} is unreachable, on the wrong chain, or lagging past max_lag. Nothing on this network is being read.
+          dashboard: /d/graph-monitor
+
+      # Muted while the whole source is down, so an outage is one alert, not one per watch.
+      - alert: GraphMonitorWatchUnreadable
+        expr: |
+          max by (network, group, account, watch) (gm_read_unknown) == 1
+            unless on (network) (max by (network) (gm_source_up{source=~"rpc:.*"}) == 0)
+        for: 15m
+        labels:
+          team: Protocol and Network
+          priority: P3
+        annotations:
+          summary: Cannot read {{ $labels.watch }} for {{ $labels.account }}
+          description: The source is up, but this watch keeps failing. Usually a provider limit (429s) or a log range the endpoint refuses. Its value alerts are blind until this clears.
+          dashboard: /d/graph-monitor
+
+  # -------------------------------------------------------------------------------------
+  # Subgraphs. Each configured subgraph is checked every cycle with a _meta query.
+  # -------------------------------------------------------------------------------------
+  - name: graph-monitor.subgraphs
+    rules:
+      # Down covers every way a subgraph stops being trustworthy: no answer, the wrong
+      # deployment, indexing errors, or a latest block older than its max_lag. The summary
+      # metric does not say which; the dashboard and `graph-monitor status` do.
+      - alert: GraphMonitorSubgraphDown
+        expr: max by (network, source) (gm_source_up{source=~"subgraph:.*"}) == 0
+        for: 15m
+        labels:
+          team: Protocol and Network
+          priority: P3
+        annotations:
+          summary: "{{ $labels.source }} is down"
+          description: The subgraph is unreachable, serving the wrong deployment, reporting indexing errors, or further behind the chain than its max_lag. Run `graph-monitor status` for the reason.
+          dashboard: /d/graph-monitor
+
+  # -------------------------------------------------------------------------------------
+  # Balances
+  # -------------------------------------------------------------------------------------
+  - name: graph-monitor.balances
+    rules:
+      # Uses the account's own remediation trigger as the threshold, so there are no
+      # thresholds to keep in sync. The tool tops up at `below`. If the balance stays
+      # under it, remediation is off, broken, or outpaced. Fires only for accounts with
+      # a remediate block.
+      - alert: GraphMonitorEthBelowRemediationTrigger
+        expr: |
+          max by (network, group, account) (gm_account_eth_balance)
+            < on (network, group, account)
+          max by (network, group, account) (gm_account_remediation_below{asset="eth"})
+        for: 30m
+        labels:
+          team: Protocol and Network
+          priority: P1
+        annotations:
+          summary: "{{ $labels.account }} ETH has stayed below its top-up trigger for 30m"
+          description: "Balance {{ $value | humanize }} ETH. Auto top-up is not keeping it up: check GraphMonitorRemediationFailed and the funding account."
+          dashboard: /d/graph-monitor
+
+      - alert: GraphMonitorGrtBelowRemediationTrigger
+        expr: |
+          max by (network, group, account) (gm_account_grt_balance)
+            < on (network, group, account)
+          max by (network, group, account) (gm_account_remediation_below{asset="grt"})
+        for: 30m
+        labels:
+          team: Protocol and Network
+          priority: P1
+        annotations:
+          summary: "{{ $labels.account }} GRT has stayed below its top-up trigger for 30m"
+          description: "Balance {{ $value | humanize }} GRT. Auto top-up is not keeping it up: check GraphMonitorRemediationFailed and the funding account."
+          dashboard: /d/graph-monitor
+
+      # For accounts without remediation: warn while there are days left, not when the
+      # balance is already at zero. Accounts with remediation are excluded, because
+      # top-ups wreck the slope.
+      - alert: GraphMonitorEthRunningOut
+        expr: |
+          max by (network, group, account) (predict_linear(gm_account_eth_balance[12h], 3 * 86400)) < 0
+            unless on (network, group, account) gm_account_remediation_below{asset="eth"}
+        for: 1h
+        labels:
+          team: Protocol and Network
+          priority: P3
+        annotations:
+          summary: "{{ $labels.account }} runs out of ETH in under 3 days at the current rate"
+          description: Projection from the last 12h of spend. Top it up, or add a remediate block.
+          dashboard: /d/graph-monitor
+
+      # Fixed floors, for accounts where the rate does not tell you enough. The values
+      # come from grafana/README.md. Adjust them, or add accounts.
+      - alert: GraphMonitorBalanceBelowFloor
+        expr: |
+          min by (network, group, account) (gm_account_eth_balance{account="NetworkMonitor"}) < 0.3
+            or
+          min by (network, group, account) (gm_account_grt_balance{account="GraphTallyWallet"}) < 25000
+        for: 15m
+        labels:
+          team: Protocol and Network
+          priority: P3
+        annotations:
+          summary: "{{ $labels.account }} balance is below its floor ({{ $value | humanize }})"
+          description: Below the fixed floor set in grafana/alerts.yaml.
+          dashboard: /d/graph-monitor
+
+  # -------------------------------------------------------------------------------------
+  # Remediation
+  # -------------------------------------------------------------------------------------
+  - name: graph-monitor.remediation
+    rules:
+      - alert: GraphMonitorRemediationFailed
+        expr: sum by (network, account, asset) (increase(gm_remediation_total{outcome="failed"}[1h])) > 0
+        labels:
+          team: Protocol and Network
+          priority: P1
+        annotations:
+          summary: Top-up of {{ $labels.asset }} for {{ $labels.account }} failed
+          description: "{{ $value | humanize }} failed attempts in the last hour. More urgent than the low balance that triggered it: the safety net is broken."
+          dashboard: /d/graph-monitor
+
+  # -------------------------------------------------------------------------------------
+  # Allowances. A revoked approval breaks a money path without changing anything else.
+  # -------------------------------------------------------------------------------------
+  - name: graph-monitor.allowances
+    rules:
+      # Fires on the 1 -> 0 change only, so an intentionally finite approval does not
+      # alert forever. The alert resolves after 1h whether or not the approval comes
+      # back. If that is too forgiving, alert on `== 0` for the specific owner/spender
+      # pairs that must stay unlimited.
+      - alert: GraphMonitorUnlimitedAllowanceRevoked
+        expr: |
+          max by (network, group, owner, spender) (gm_account_allowance_unlimited) == 0
+            and on (network, group, owner, spender)
+          max by (network, group, owner, spender) (gm_account_allowance_unlimited offset 1h) == 1
+        labels:
+          team: Protocol and Network
+          priority: P1
+        annotations:
+          summary: "{{ $labels.owner }} no longer has an unlimited GRT approval for {{ $labels.spender }}"
+          description: The approval was unlimited an hour ago. Check for a revoke or re-approve transaction from the owner. The spender's pulls will fail once the remaining allowance runs out.
+          dashboard: /d/graph-monitor
+
+  # -------------------------------------------------------------------------------------
+  # Activity. Only accounts with an `activity` block export these.
+  # -------------------------------------------------------------------------------------
+  - name: graph-monitor.activity
+    rules:
+      - alert: GraphMonitorAccountQuiet
+        expr: max by (network, group, account) (gm_account_activity_seen) == 0
+        for: 30m
+        labels:
+          team: Protocol and Network
+          priority: P3
+        annotations:
+          summary: "{{ $labels.account }} has no activity in the lookback window"
+          description: The configured event was not emitted within the lookback. For an oracle, it has probably stopped submitting.
+          dashboard: /d/graph-monitor

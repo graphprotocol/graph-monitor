@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use alloy::primitives::Address;
 use graph_monitor_core::engine::CycleReport;
+use graph_monitor_core::source::SourceHealth;
 use graph_monitor_core::watch::{Measurement, Reading};
 use graph_monitor_core::watches::{
     humanize, M_ALLOWANCE, M_ALLOWANCE_UNLIMITED, M_ETH_BALANCE, M_GRT_BALANCE, M_IDLE_SECONDS,
@@ -295,8 +296,69 @@ pub fn grouped(report: &CycleReport) -> String {
         }
     }
 
+    if !report.subgraphs.is_empty() {
+        out.push('\n');
+        out.push_str(&style::bold("Subgraphs"));
+        out.push('\n');
+        out.push_str(&subgraph_table(&report.subgraphs));
+    }
+
     out.push_str(&format!("\n{}\n", summary_line(report)));
     out
+}
+
+/// Nothing here is graded beyond what stage 0 already decided: up means reachable, the
+/// expected deployment, no indexing errors, and inside `max_lag`.
+fn subgraph_table(subgraphs: &[SourceHealth]) -> String {
+    let mut table = Table::new(&[
+        ("Subgraph", Align::Left),
+        ("Up", Align::Left),
+        ("Indexed block", Align::Right),
+        ("Behind", Align::Right),
+        ("Lag", Align::Right),
+        ("Detail", Align::Left),
+    ]);
+    for sg in subgraphs {
+        let label = sg
+            .id
+            .as_str()
+            .strip_prefix("subgraph:")
+            .unwrap_or(sg.id.as_str());
+        // A deployment sits under the subgraph it was listed with.
+        let label = match label.split_once('@') {
+            Some((_, deployment)) => format!("  └ {deployment}"),
+            None => label.to_string(),
+        };
+        // Unknown renders as `!` only when the subgraph could not be read at all. A gap
+        // that could not be measured (RPC down, no timestamp) is blank, not a failure.
+        let unknown = if sg.indexed_block.is_none() {
+            style::alarm(UNREADABLE)
+        } else {
+            style::dim(UNCONFIGURED)
+        };
+        table.push(vec![
+            label,
+            if sg.is_up() {
+                "yes".to_string()
+            } else {
+                style::alarm("no")
+            },
+            sg.indexed_block
+                .map(group_thousands)
+                .unwrap_or_else(|| unknown.clone()),
+            sg.blocks_behind
+                .map(|b| format!("{} blocks", group_thousands(b)))
+                .unwrap_or_else(|| unknown.clone()),
+            sg.lag
+                .map(|l| humanize(l.as_secs()))
+                .unwrap_or_else(|| unknown.clone()),
+            match &sg.fault {
+                Some(fault) => style::alarm(&fault.summary()),
+                None => style::dim(sg.deployment.as_deref().unwrap_or_default()),
+            },
+        ]);
+    }
+    table.render()
 }
 
 /// An unlimited approval is ~1.15e59 GRT once scaled; never print that.
@@ -340,6 +402,19 @@ pub fn flat(report: &CycleReport, unreadable_only: bool) -> String {
         ]);
     }
 
+    // Subgraphs are sources rather than watches, but in a flat list of "what did and did
+    // not resolve" they belong beside everything else.
+    for sg in &report.subgraphs {
+        if unreadable_only && sg.is_up() {
+            continue;
+        }
+        table.push(vec![
+            if sg.is_up() { "ok" } else { "!" }.to_string(),
+            sg.id.to_string(),
+            subgraph_summary(sg),
+        ]);
+    }
+
     if table.is_empty() {
         out.push_str(if unreadable_only {
             "Every watch was read successfully.\n"
@@ -354,11 +429,46 @@ pub fn flat(report: &CycleReport, unreadable_only: bool) -> String {
     out
 }
 
+/// Why each unreadable watch failed, for stderr.
+///
+/// A count alone sends the reader off to rerun with `--flat`. Watches failing for the same
+/// reason share a line, so a provider limit hitting five accounts reads as one problem.
+pub fn unreadable_notes(report: &CycleReport) -> Vec<String> {
+    let mut by_reason: Vec<((&str, &str), Vec<&str>)> = Vec::new();
+    for reading in report.unreadable() {
+        let key = (reading.id.kind, reading.summary());
+        let instance = reading.id.instance.as_str();
+        match by_reason.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, instances)) => instances.push(instance),
+            None => by_reason.push((key, vec![instance])),
+        }
+    }
+    by_reason
+        .into_iter()
+        .map(|((kind, reason), instances)| format!("{kind} {}: {reason}", instances.join(", ")))
+        .collect()
+}
+
+fn subgraph_summary(sg: &SourceHealth) -> String {
+    match (&sg.fault, sg.indexed_block, sg.blocks_behind) {
+        (Some(fault), _, _) => fault.summary(),
+        (None, Some(block), Some(behind)) => {
+            format!("indexed to block {block}, {behind} blocks behind the chain head")
+        }
+        (None, Some(block), None) => format!("indexed to block {block}"),
+        (None, None, _) => "reachable".to_string(),
+    }
+}
+
 pub fn summary_line(report: &CycleReport) -> String {
     let (read, unreadable) = report.counts();
     let mut parts = vec![style::dim(&format!("{read} read"))];
     if unreadable > 0 {
         parts.push(style::alarm(&format!("{unreadable} unreadable")));
+    }
+    let down = report.subgraphs_down().count();
+    if down > 0 {
+        parts.push(style::alarm(&format!("{down} subgraph(s) down")));
     }
     let pending = report.remediations().count();
     if pending > 0 {
@@ -418,6 +528,15 @@ pub fn json(report: &CycleReport) -> Value {
         },
         "counts": { "read": read, "unreadable": unreadable },
         "watches": readings,
+        "subgraphs": report.subgraphs.iter().map(|sg| json!({
+            "id": sg.id.as_str(),
+            "up": sg.is_up(),
+            "summary": subgraph_summary(sg),
+            "deployment": sg.deployment,
+            "indexed_block": sg.indexed_block,
+            "blocks_behind": sg.blocks_behind,
+            "lag_seconds": sg.lag.map(|l| l.as_secs()),
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -426,7 +545,7 @@ mod tests {
     use super::*;
     use alloy::primitives::U256;
     use graph_monitor_core::rpc::PinnedBlock;
-    use graph_monitor_core::source::{SourceHealth, SourceId};
+    use graph_monitor_core::source::{SourceFault, SourceId};
     use graph_monitor_core::units::Amount;
     use graph_monitor_core::watch::{Asset, Labels, Observation, RemediationIntent, Unit, WatchId};
     use std::time::Duration;
@@ -481,17 +600,85 @@ mod tests {
             network: "arbitrum-one".into(),
             chain_id: 42161,
             source: SourceHealth {
-                id: SourceId::rpc("arbitrum-one"),
-                network: "arbitrum-one".into(),
                 chain_id: Some(42161),
                 head: Some(head),
                 lag: Some(Duration::from_secs(2)),
-                fault: None,
+                ..SourceHealth::new(SourceId::rpc("arbitrum-one"), "arbitrum-one")
             },
             block: Some(head),
             readings,
+            subgraphs: Vec::new(),
             duration: Duration::ZERO,
         }
+    }
+
+    fn subgraph(label: &str, indexed: Option<u64>, fault: Option<SourceFault>) -> SourceHealth {
+        SourceHealth {
+            indexed_block: indexed,
+            blocks_behind: indexed.map(|b| 505_090_074 - b),
+            lag: indexed.map(|_| Duration::from_secs(45)),
+            deployment: indexed.map(|_| "QmDeployment".to_string()),
+            fault,
+            ..SourceHealth::new(SourceId::subgraph(label), "arbitrum-one")
+        }
+    }
+
+    #[test]
+    fn subgraphs_render_their_lag_and_failures() {
+        let mut r = report(vec![]);
+        r.subgraphs = vec![
+            subgraph("network", Some(505_089_974), None),
+            subgraph("network@QmNext", Some(505_000_000), None),
+            subgraph(
+                "ebo",
+                None,
+                Some(SourceFault::Unreachable("subgraph not found".into())),
+            ),
+        ];
+        let out = grouped(&r);
+        let row = |name: &str| out.lines().find(|l| l.contains(name)).unwrap().to_string();
+        assert!(row("network").contains("100 blocks"), "{out}");
+        assert!(row("network").contains("45s"), "{out}");
+        assert!(row("ebo").contains("subgraph not found"), "{out}");
+        // A listed deployment renders under its subgraph, not as a sibling.
+        assert!(row("QmNext").contains("└ QmNext"), "{out}");
+        assert!(summary_line(&r).contains("1 subgraph(s) down"));
+
+        let flat_out = flat(&r, true);
+        assert!(flat_out.contains("subgraph:ebo"), "{flat_out}");
+        assert!(!flat_out.contains("subgraph:network"), "{flat_out}");
+
+        let v = json(&r);
+        assert_eq!(v["subgraphs"][0]["blocks_behind"], json!(100));
+        assert_eq!(v["subgraphs"][2]["up"], json!(false));
+    }
+
+    #[test]
+    fn unreadable_notes_say_why_and_group_shared_reasons() {
+        let mut a = unreadable("activity", "SamOracleGraphOps");
+        a.observation = Err("searched 600000 blocks without reaching the lookback".into());
+        let mut b = unreadable("activity", "SamOracleSemiotic");
+        b.observation = a.observation.clone();
+        let c = unreadable("eth_balance", "BillingWallet");
+        let notes = unreadable_notes(&report(vec![
+            a,
+            outcome("eth_balance", "Fine", None, None),
+            b,
+            c,
+        ]));
+        assert_eq!(
+            notes,
+            [
+                "activity SamOracleGraphOps, SamOracleSemiotic: searched 600000 blocks without \
+                 reaching the lookback",
+                "eth_balance BillingWallet: endpoint refused historical state",
+            ]
+        );
+    }
+
+    #[test]
+    fn no_subgraphs_means_no_subgraph_section() {
+        assert!(!grouped(&report(vec![])).contains("Subgraphs"));
     }
 
     #[test]

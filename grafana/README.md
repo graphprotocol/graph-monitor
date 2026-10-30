@@ -35,8 +35,11 @@ discarded forty digits by then, so comparing the raw gauge against `2^255` gives
 
 ## Alert rules
 
-None ship yet. These are the queries worth starting from — keep them in git next to this file
-rather than defining them in the UI, so a rule and the config it depends on review together.
+[`alerts.yaml`](alerts.yaml) is a ready-to-load rules file built from these queries. It is
+plain Prometheus format, so it works with vmalert, Prometheus or Grafana's rule import. Its
+rules aggregate away scrape-time labels like `pod` so restarts don't duplicate alerts. Below
+are the ideas behind it. Keep rules in git next to this file rather than defining them in the
+UI, so a rule and the config it depends on review together.
 
 **Deadman — the exporter stopped.** `up` catches a dead process; this catches one that is alive
 but wedged, which is the failure that otherwise goes unnoticed.
@@ -50,8 +53,15 @@ time() - gm_cycle_last_success_timestamp > 600
 not a wallet.
 
 ```promql
-gm_read_unknown == 1          # for: 15m
-gm_source_up == 0             # for: 5m
+gm_read_unknown == 1                      # for: 15m
+gm_source_up{source=~"rpc:.*"} == 0       # for: 5m
+```
+
+**A subgraph is down or behind.** Down already includes "behind by more than its `max_lag`", so
+one rule covers both; use `gm_source_blocks_behind` for a tighter, per-subgraph line.
+
+```promql
+gm_source_up{source=~"subgraph:.*"} == 0  # for: 15m
 ```
 
 **Low balances.** Thresholds live here, not in the tool.
@@ -110,7 +120,8 @@ histogram_quantile(0.95, sum by (le) (rate(gm_cycle_duration_seconds_bucket[15m]
 | `gm_read_ok` / `gm_read_unknown` | gauge | 1/0 per watch |
 | `gm_read_errors_total` | counter | Failed reads by watch kind |
 | `gm_read_duration_seconds` | histogram | Per watch kind |
-| `gm_source_up` / `_lag_seconds` / `_block_height` | gauge | Stage 0 |
+| `gm_source_up` / `_lag_seconds` / `_block_height` | gauge | Stage 0. `source` is `rpc:<network>` or `subgraph:<label>`; for a subgraph the height is the latest indexed block |
+| `gm_source_blocks_behind` | gauge | Subgraphs only: blocks between the latest indexed block and the RPC head. Absent when the RPC is down |
 | `gm_block_height` | gauge | Height every value in the cycle was read at |
 | `gm_cycle_last_success_timestamp` | gauge | Deadman |
 | `gm_cycle_duration_seconds` | histogram | |
