@@ -61,21 +61,21 @@ groups:
   - name: graph-monitor.visibility
     rules:
       - alert: GraphMonitorSourceDown
-        expr: max by (network, source) (gm_source_up{source=~"rpc:.*"}) == 0
+        expr: max by (network, source) (gm_source_up) == 0
         for: 5m
         labels:
           team: Protocol and Network
           priority: P1
         annotations:
-          summary: "{{ $labels.network }} source failed verification"
-          description: The RPC source for {{ $labels.network }} is unreachable, on the wrong chain, or lagging past max_lag. Nothing on this network is being read.
+          summary: "{{ $labels.source }} failed verification"
+          description: A source graph-monitor reads from ({{ $labels.source }}) is unreachable, on the wrong chain, or lagging past max_lag. The tool is blind to everything it reads through it. This is the tool's problem, not the network's.
           dashboard: /d/graph-monitor
 
       # Muted while the whole source is down, so an outage is one alert, not one per watch.
       - alert: GraphMonitorWatchUnreadable
         expr: |
           max by (network, group, account, watch) (gm_read_unknown) == 1
-            unless on (network) (max by (network) (gm_source_up{source=~"rpc:.*"}) == 0)
+            unless on (network) (min by (network) (gm_source_up) == 0)
         for: 15m
         labels:
           team: Protocol and Network
@@ -90,18 +90,32 @@ groups:
   # -------------------------------------------------------------------------------------
   - name: graph-monitor.subgraphs
     rules:
-      # Down covers every way a subgraph stops being trustworthy: no answer, the wrong
-      # deployment, indexing errors, or a latest block older than its max_lag. The summary
-      # metric does not say which; the dashboard and `graph-monitor status` do.
+      # A subgraph is a component of the network, so down is a finding about the network.
+      # Down covers every way it stops being trustworthy: no answer, the wrong deployment,
+      # indexing errors, or a latest block older than its max_lag. `graph-monitor status`
+      # says which.
       - alert: GraphMonitorSubgraphDown
-        expr: max by (network, source) (gm_source_up{source=~"subgraph:.*"}) == 0
+        expr: max by (network, subgraph, deployment) (gm_subgraph_up) == 0
         for: 15m
         labels:
           team: Protocol and Network
           priority: P3
         annotations:
-          summary: "{{ $labels.source }} is down"
-          description: The subgraph is unreachable, serving the wrong deployment, reporting indexing errors, or further behind the chain than its max_lag. Run `graph-monitor status` for the reason.
+          summary: "Subgraph {{ $labels.subgraph }} {{ $labels.deployment }} is down"
+          description: The subgraph is not answering, is serving the wrong deployment, reports indexing errors, or is further behind the chain than its max_lag. Run `graph-monitor status` for the reason.
+          dashboard: /d/graph-monitor
+
+      # Our side, not the subgraph's: no API key, or the gateway refused ours. Separate from
+      # SubgraphDown so a key problem never pages as a network problem.
+      - alert: GraphMonitorSubgraphNotChecked
+        expr: max by (network, subgraph, deployment) (gm_subgraph_not_checked) == 1
+        for: 30m
+        labels:
+          team: Protocol and Network
+          priority: P3
+        annotations:
+          summary: "graph-monitor cannot check subgraph {{ $labels.subgraph }}"
+          description: The check never reached the subgraph, usually a missing or rejected gateway API key. Fix the key; nothing is known about the subgraph until then.
           dashboard: /d/graph-monitor
 
   # -------------------------------------------------------------------------------------

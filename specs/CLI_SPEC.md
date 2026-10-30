@@ -84,37 +84,39 @@ Resolution order, later wins:
 `${VAR}` in any string value is expanded from the environment, so RPC URLs with API keys stay
 out of the file.
 
-Merging is per-key, not whole-file: a user config that sets one `rpc_url` keeps every shipped
+Merging is per-key, not whole-file: a user config that sets one RPC `url` keeps every shipped
 address, and a user watchlist *adds to* the shipped one. See [Extending and replacing
 defaults](#extending-and-replacing-defaults).
 
 Setting `use_defaults = false` drops layer 1 entirely — the binary then behaves as if nothing
 were shipped with it.
 
-### Networks
+### Sources and address books
 
-`[networks.<name>]` describes how to reach a chain. `[networks.<name>.contracts]` is the
-address book for that chain — plain name-to-address, ours to curate, no external source.
+`[sources.rpc.<network>]` and `[sources.subgraph.<network>]` are what the tool reads from. They are
+kept apart from everything else because a source failing means the tool is blind, while the rest of
+config is about what the tool watches.
+
+Each RPC is checked against the chain id of its network. Chain ids are built in for well-known
+networks (mainnet, sepolia, arbitrum-one, arbitrum-sepolia, gnosis); any other network sets
+`chain_id` next to its `url`, and a configured value wins over the built-in one.
+
+`[addresses.<network>]` is the address book for that chain — plain name-to-address, ours to
+curate, no external source.
 
 ```toml
-default_network = "arbitrum-one"
+[sources.rpc.arbitrum-one]
+url = "${ARBITRUM_ONE_RPC_URL}"
 
-[networks.arbitrum-one]
-chain_id = 42161
-rpc_url  = "${ARBITRUM_ONE_RPC_URL}"
+[sources.rpc.my-devnet]
+url      = "http://localhost:8545"
+chain_id = 31337
 
-[networks.arbitrum-one.contracts]
+[addresses.arbitrum-one]
 GraphToken          = "0x9623063377AD1B27544C965cCd7342f7EA7e88C7"
 HorizonStaking      = "0x..."
 PaymentsEscrow      = "0x..."
 GraphTallyCollector = "0x..."
-
-[networks.arbitrum-sepolia]
-chain_id = 421614
-rpc_url  = "${ARBITRUM_SEPOLIA_RPC_URL}"
-
-[networks.arbitrum-sepolia.contracts]
-GraphToken = "0x..."
 ```
 
 `GraphToken` is a **required** key for any network with GRT or allowance watches — it is
@@ -147,7 +149,7 @@ watch   = ["eth", "grt"]
 
 A name used in `allowances` resolves in this order, within the active network:
 
-1. A key in `[networks.<name>.contracts]`
+1. A key in `[addresses.<network>]`
 2. An account `label` in that network's watchlist
 3. Otherwise it must parse as a hex address
 
@@ -159,14 +161,14 @@ a readout lie.
 
 User config **extends** the shipped defaults. Declaring `[[accounts.arbitrum-one]]` in
 your own config adds accounts to the shipped list for that network; it does not discard it.
-Same for `[networks.*.contracts]` — your names are added alongside ours.
+Same for `[addresses.*]` — your names are added alongside ours.
 
 Two escape hatches, because extension alone cannot express "watch less":
 
 **Ignore the defaults wholesale.** A top-level `use_defaults = false` (or `--no-defaults` for a
 single run) drops the shipped layer completely: no shipped networks, no shipped contract
 addresses, no shipped watchlist. Your config becomes the entire truth. Note the consequence —
-you now have to supply `GraphToken` and an `rpc_url` yourself, since those come from the
+you now have to supply `GraphToken` and an RPC source yourself, since those come from the
 shipped layer too.
 
 **Disable one account.** `enabled = false` on a watchlist entry removes it from readouts.
@@ -187,9 +189,9 @@ rather than inferred.
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--network <name>` | `default_network` | Selects a `[networks.*]` entry. |
-| `--rpc-url <url>` | from network | Overrides the endpoint without touching config. |
-| `--block <n\|latest>` | `latest` | Pins the read. All values come from this block. |
+| `--network <name>` | all | Runs only this network. Without it, every network with something to watch runs. |
+| `--rpc-url <url>` | from config | Overrides one network's endpoint without touching config. Needs `--network` when several networks run. |
+| `--block <n\|latest>` | `latest` | Pins the read. All values come from this block. A number belongs to one chain, so it needs `--network` when several networks run. |
 | `--json` | off | Machine-readable output on stdout. |
 | `--config <path>` | see above | Explicit config file. |
 | `--no-defaults` | off | Ignore the shipped config layer for this run. Equivalent to `use_defaults = false`. |
@@ -208,8 +210,8 @@ Every command states the block its data came from, in every output mode. No exce
 - **Human output** opens with a header line carrying network name, chain ID, block number, and
   the block's UTC timestamp. A pasted screenshot is therefore self-describing, and two readouts
   can be compared without guessing whether they are even from the same height.
-- **`--json`** carries `network`, `chain_id`, `block`, and `block_timestamp` as top-level
-  fields, before any data.
+- **`--json`** opens with a `networks` array carrying each network's name, chain ID, block, and
+  block timestamp, before any data.
 - **Partial failures** still report the block. A readout with `!` cells is still pinned.
 - **Errors that occur after the block is resolved** report it on stderr, so a failed run still
   says where it was looking.
@@ -239,7 +241,7 @@ count of pending repairs when remediation is configured.
 |---|---|
 | 0 | The cycle ran. Some watches may be unreadable; that is reported, not fatal |
 | 2 | Usage or config error (bad address, unknown network, unresolvable name) |
-| 3 | The source failed verification, so nothing could be read |
+| 3 | A network's RPC failed verification, so that network's watches were not read |
 
 There is deliberately no exit code for "a balance is low" — the tool has no opinion about that.
 A dead source *is* non-zero, because a run that read nothing must not look like a clean pass to
@@ -361,7 +363,7 @@ All contract reads for one command are batched through **Multicall3**
 (`0xcA11bde05977b3631167028862bE2a173976CA11`, same address on every supported chain) at the
 pinned block, so `billing status` over N accounts is a small constant number of round trips
 rather than `3N`. A chain that deployed it elsewhere can override the address with a
-`Multicall3` key in `[networks.*.contracts]`. Batches are chunked so a large watchlist does not
+`Multicall3` key in `[addresses.*]`. Batches are chunked so a large watchlist does not
 exceed provider request-size limits. `eth_getBalance` is not multicall-able as a normal call;
 it is issued concurrently against the same block number.
 

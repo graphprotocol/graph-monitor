@@ -47,15 +47,18 @@ pub enum ConfigError {
     MissingEnvVar { path: String, var: String },
 
     #[error(
-        "no network selected: pass --network, or set default_network in config{}",
-        if *no_defaults {
-            " (note: --no-defaults / use_defaults = false is in effect, so the shipped \
-              networks and default_network are not loaded)"
-        } else {
-            ""
-        }
+        "{layer}: default_network has been removed. Every configured network now runs; pass \
+         --network to run just one"
     )]
-    NoNetworkSelected { no_defaults: bool },
+    DefaultNetworkRemoved { layer: String },
+
+    #[error(
+        "--rpc-url replaces one network's RPC, but {} networks would run ({}); pass --network \
+         to pick one",
+        networks.len(),
+        join_or_none(networks)
+    )]
+    RpcOverrideNeedsNetwork { networks: Vec<String> },
 
     #[error(
         "unknown network {name:?}; configured networks: {}",
@@ -66,14 +69,30 @@ pub enum ConfigError {
         available: Vec<String>,
     },
 
-    #[error("network {network:?} has no chain_id configured")]
+    #[error(
+        "network {network:?} is not one graph-monitor knows by name, so its chain id must be \
+         set:\n\n  [sources.rpc.{network}]\n  chain_id = …"
+    )]
     MissingChainId { network: String },
 
-    #[error("network {network:?} has no rpc_url configured; set it in config or pass --rpc-url")]
+    #[error(
+        "network {network:?} has no RPC configured; set url in [sources.rpc.{network}] or pass \
+         --rpc-url"
+    )]
     MissingRpcUrl { network: String },
 
     #[error(
-        "network {network:?} has no GraphToken entry in [networks.{network}.addresses], which \
+        "{layer}: [networks.*] has been removed. Its parts moved:\n\n  \
+         [networks.X.addresses] -> [addresses.X]\n  \
+         networks.X.signer_key  -> [remediation.X] signer_key\n  \
+         networks.X.chain_id    -> not needed for well-known networks; otherwise \
+         [sources.rpc.X] chain_id\n  \
+         networks.X.rpc_url     -> [sources.rpc.X] url"
+    )]
+    NetworksRemoved { layer: String },
+
+    #[error(
+        "network {network:?} has no GraphToken entry in [addresses.{network}], which \
          GRT balance and allowance checks require{}",
         if *no_defaults {
             " (note: --no-defaults / use_defaults = false is in effect, so the shipped \
@@ -152,19 +171,15 @@ pub enum ConfigError {
     DuplicateLabel { network: String, label: String },
 
     #[error(
-        "no accounts configured for network {network:?}.\n\
+        "nothing to watch: no network has accounts and no subgraphs are configured.\n\
          Config loaded from: {}\n\n\
          Add accounts to your config:\n\n\
-         [[accounts.{network}]]\n\
-         address = \"MyWallet\"        # a name from [networks.{network}.addresses], or 0x…\n\
-         group   = \"billing\"         # optional label\n\
-         eth.min = [[\"0.05\", \"P2\"]]  # warn below 0.05 ETH",
+         [[accounts.arbitrum-one]]\n\
+         address = \"MyWallet\"   # a name from [addresses.arbitrum-one], or 0x…\n\
+         watch   = [\"eth\"]",
         join_or_none(sources)
     )]
-    NoAccounts {
-        network: String,
-        sources: Vec<String>,
-    },
+    NothingToWatch { sources: Vec<String> },
 }
 
 #[derive(Debug, thiserror::Error)]

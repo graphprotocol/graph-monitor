@@ -11,8 +11,8 @@ impl SourceId {
         SourceId(format!("rpc:{network}"))
     }
 
-    pub fn subgraph(label: &str) -> Self {
-        SourceId(format!("subgraph:{label}"))
+    pub fn subgraph(name: &str) -> Self {
+        SourceId(format!("subgraph:{name}"))
     }
 
     pub fn as_str(&self) -> &str {
@@ -37,12 +37,11 @@ pub enum SourceFault {
     Stale { lag: Duration, max_lag: Duration },
     /// Live, but cannot serve *state* at the requested block.
     StateUnavailable { block: u64, reason: String },
-    /// Not queryable as configured, e.g. no API key. Nothing was attempted.
-    Unconfigured(String),
-    /// The subgraph answers, but from a different deployment than config pins.
-    WrongDeployment { expected: String, actual: String },
-    /// graph-node reports indexing errors, so what it serves may be wrong or frozen.
-    IndexingErrors,
+    /// A subgraph source answered badly: wrong deployment, indexing errors, stale, or no
+    /// usable answer at all.
+    Subgraph(crate::subgraph::SubgraphFault),
+    /// A subgraph source could not be queried from our side, e.g. no API key.
+    NotQueryable(String),
 }
 
 impl SourceFault {
@@ -61,11 +60,8 @@ impl SourceFault {
                 "state at block {block} is not available from this endpoint — reading a \
                  historical block usually needs an archive node ({reason})"
             ),
-            SourceFault::Unconfigured(reason) => format!("not configured: {reason}"),
-            SourceFault::WrongDeployment { expected, actual } => {
-                format!("serving deployment {actual}, config expects {expected}")
-            }
-            SourceFault::IndexingErrors => "subgraph has indexing errors".to_string(),
+            SourceFault::Subgraph(fault) => fault.summary(),
+            SourceFault::NotQueryable(reason) => format!("cannot be queried: {reason}"),
         }
     }
 }
@@ -79,13 +75,6 @@ pub struct SourceHealth {
     pub head: Option<PinnedBlock>,
     pub lag: Option<Duration>,
     pub fault: Option<SourceFault>,
-    /// Subgraphs only: the deployment that answered.
-    pub deployment: Option<String>,
-    /// Subgraphs only: the latest block indexed. Known even when `head` is not, because the
-    /// block's timestamp can be missing.
-    pub indexed_block: Option<u64>,
-    /// Subgraphs only: blocks between the latest indexed block and the RPC's head.
-    pub blocks_behind: Option<u64>,
 }
 
 impl SourceHealth {
@@ -98,16 +87,7 @@ impl SourceHealth {
             head: None,
             lag: None,
             fault: None,
-            deployment: None,
-            indexed_block: None,
-            blocks_behind: None,
         }
-    }
-
-    /// The height this source is at: the chain head for an RPC, the latest indexed block for
-    /// a subgraph.
-    pub fn block_height(&self) -> Option<u64> {
-        self.indexed_block.or(self.head.map(|h| h.number))
     }
 
     pub fn is_up(&self) -> bool {
@@ -191,6 +171,19 @@ impl RpcSource {
     }
 }
 
+/// Chain ids of networks the tool knows by name, so config need not repeat them. The id is
+/// what every RPC is checked against: a URL cannot be trusted to say which chain it serves.
+pub fn known_chain_id(network: &str) -> Option<u64> {
+    match network {
+        "mainnet" => Some(1),
+        "sepolia" => Some(11_155_111),
+        "arbitrum-one" => Some(42161),
+        "arbitrum-sepolia" => Some(421_614),
+        "gnosis" => Some(100),
+        _ => None,
+    }
+}
+
 /// Default freshness allowance, chosen roughly an order of magnitude above block time so
 /// ordinary jitter never trips it.
 pub fn default_max_lag(chain_id: u64) -> Duration {
@@ -248,6 +241,13 @@ mod tests {
         };
         assert!(mismatch.summary().contains("42161"));
         assert!(mismatch.summary().contains('1'));
+    }
+
+    #[test]
+    fn well_known_networks_need_no_chain_id() {
+        assert_eq!(known_chain_id("arbitrum-one"), Some(42161));
+        assert_eq!(known_chain_id("gnosis"), Some(100));
+        assert_eq!(known_chain_id("my-devnet"), None);
     }
 
     #[test]

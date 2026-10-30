@@ -53,15 +53,18 @@ time() - gm_cycle_last_success_timestamp > 600
 not a wallet.
 
 ```promql
-gm_read_unknown == 1                      # for: 15m
-gm_source_up{source=~"rpc:.*"} == 0       # for: 5m
+gm_read_unknown == 1          # for: 15m
+gm_source_up == 0             # for: 5m
 ```
 
-**A subgraph is down or behind.** Down already includes "behind by more than its `max_lag`", so
-one rule covers both; use `gm_source_blocks_behind` for a tighter, per-subgraph line.
+**A subgraph is down or behind.** A finding about the network, not the tool. Down already
+includes "behind by more than its `max_lag`", so one rule covers both; use
+`gm_subgraph_blocks_behind` for a tighter, per-subgraph line. Alert on `not_checked` separately:
+it means our API key, not the subgraph.
 
 ```promql
-gm_source_up{source=~"subgraph:.*"} == 0  # for: 15m
+gm_subgraph_up == 0           # for: 15m
+gm_subgraph_not_checked == 1  # for: 30m
 ```
 
 **Low balances.** Thresholds live here, not in the tool.
@@ -120,8 +123,10 @@ histogram_quantile(0.95, sum by (le) (rate(gm_cycle_duration_seconds_bucket[15m]
 | `gm_read_ok` / `gm_read_unknown` | gauge | 1/0 per watch |
 | `gm_read_errors_total` | counter | Failed reads by watch kind |
 | `gm_read_duration_seconds` | histogram | Per watch kind |
-| `gm_source_up` / `_lag_seconds` / `_block_height` | gauge | Stage 0. `source` is `rpc:<network>` or `subgraph:<label>`; for a subgraph the height is the latest indexed block |
-| `gm_source_blocks_behind` | gauge | Subgraphs only: blocks between the latest indexed block and the RPC head. Absent when the RPC is down |
+| `gm_source_up` / `_lag_seconds` / `_block_height` | gauge | Stage 0: the sources the tool reads from. `source` is `rpc:<network>` or `subgraph:<name>`; for a subgraph the height is its latest indexed block |
+| `gm_subgraph_up` | gauge | 1/0 per subgraph check. Absent when not checked |
+| `gm_subgraph_not_checked` | gauge | 1 when our side failed (e.g. API key). Says nothing about the subgraph |
+| `gm_subgraph_block_height` / `_blocks_behind` / `_lag_seconds` | gauge | Latest indexed block, gap to the RPC head (absent when the RPC is down), age against the clock |
 | `gm_block_height` | gauge | Height every value in the cycle was read at |
 | `gm_cycle_last_success_timestamp` | gauge | Deadman |
 | `gm_cycle_duration_seconds` | histogram | |

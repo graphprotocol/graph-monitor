@@ -59,18 +59,69 @@ impl Source {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
-    default_network: Option<String>,
+    /// Removed: every configured network runs. Accepted only to say so.
+    default_network: Option<toml::Value>,
     use_defaults: Option<bool>,
+    /// Removed: its parts moved to `[addresses.*]`, `[sources.rpc.*]` and `[remediation.*]`.
+    /// Accepted only to say so.
+    networks: Option<toml::Value>,
+    /// Address books, keyed by network: `[addresses.arbitrum-one]`. Contracts *and* EOAs —
+    /// nothing in the tool cares which.
     #[serde(default)]
-    networks: BTreeMap<String, RawNetwork>,
+    addresses: BTreeMap<String, BTreeMap<String, String>>,
+    /// Remediation settings, keyed by network: `[remediation.arbitrum-one]`.
+    #[serde(default)]
+    remediation: BTreeMap<String, RawRemediation>,
     /// Keyed by network name: `[[accounts.arbitrum-one]]`.
     #[serde(default)]
     accounts: BTreeMap<String, Vec<RawAccount>>,
+    /// What the tool reads from, as opposed to what it watches.
+    sources: Option<RawSources>,
     gateway: Option<RawGateway>,
     /// Keyed by network name: `[[subgraphs.arbitrum-one]]`. The network is the chain the
     /// subgraph indexes, which is what its lag is measured against.
     #[serde(default)]
     subgraphs: BTreeMap<String, Vec<RawSubgraph>>,
+}
+
+/// Inputs. RPCs today; subgraphs the tool reads from (the Graph Monitor subgraph) later.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSources {
+    /// Keyed by network name: `[sources.rpc.arbitrum-one]`.
+    #[serde(default)]
+    rpc: BTreeMap<String, RawRpc>,
+    /// Keyed by the network the subgraph indexes: `[sources.subgraph.arbitrum-one]`.
+    #[serde(default)]
+    subgraph: BTreeMap<String, RawSubgraphSource>,
+}
+
+/// A subgraph the tool reads from. Unlike `[[subgraphs.*]]`, which are watched, a source
+/// failing makes the tool blind to what it serves.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSubgraphSource {
+    /// Names the source in output: `subgraph:<label>`. Defaults to the network.
+    label: Option<String>,
+    id: Option<String>,
+    deployment: Option<String>,
+    url: Option<String>,
+    max_lag: Option<String>,
+    enabled: Option<bool>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRpc {
+    url: Option<String>,
+    /// The chain the endpoint must report. Only needed for a network the tool does not know.
+    chain_id: Option<u64>,
+    /// How far behind wall clock the head block may be, e.g. `"60s"`.
+    max_lag: Option<String>,
+    /// Requests in flight against this endpoint at once.
+    max_concurrency: Option<usize>,
+    /// Largest `eth_getLogs` span to attempt. Narrowed automatically if the endpoint refuses.
+    max_log_range: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -99,21 +150,10 @@ struct RawSubgraph {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawNetwork {
-    chain_id: Option<u64>,
-    rpc_url: Option<String>,
-    /// Private key for remediation. Never read from the shipped layer; `${ENV}` works here,
-    /// so it need not be a literal.
+struct RawRemediation {
+    /// Private key that signs repairs on this network. Never read from the shipped layer;
+    /// `${ENV}` works here, so it need not be a literal.
     signer_key: Option<String>,
-    /// How far behind wall clock the head block may be, e.g. `"60s"`.
-    max_lag: Option<String>,
-    /// Requests in flight against this endpoint at once.
-    max_concurrency: Option<usize>,
-    /// Largest `eth_getLogs` span to attempt. Narrowed automatically if the endpoint refuses.
-    max_log_range: Option<u64>,
-    /// The address book. Holds contracts *and* EOAs — nothing in the tool cares which.
-    #[serde(default)]
-    addresses: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -177,18 +217,27 @@ struct RawAllowance {
 // Merged config
 // ---------------------------------------------------------------------------------------
 
+/// A subgraph source, as configured.
 #[derive(Debug, Default, Clone)]
-pub struct Network {
+pub struct SubgraphSource {
+    pub label: Option<String>,
+    pub id: Option<String>,
+    pub deployment: Option<String>,
+    pub url: Option<String>,
+    pub max_lag: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+/// An RPC source, as configured.
+#[derive(Debug, Default, Clone)]
+pub struct Rpc {
+    /// Kept unexpanded until needed: a config may legitimately describe networks whose
+    /// `${RPC_URL}` env vars are not set in this shell, and only the ones in use must resolve.
+    pub url: Option<String>,
     pub chain_id: Option<u64>,
-    pub signer_key: Option<String>,
-    /// Kept unexpanded until the network is selected: a config may legitimately describe
-    /// networks whose `${RPC_URL}` env vars are not set in this shell, and only the one being
-    /// queried needs to resolve.
-    pub rpc_url: Option<String>,
     pub max_lag: Option<String>,
     pub max_concurrency: Option<usize>,
     pub max_log_range: Option<u64>,
-    pub addresses: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -244,9 +293,15 @@ pub struct Subgraph {
 
 #[derive(Debug, Default)]
 pub struct Config {
-    pub default_network: Option<String>,
-    pub networks: BTreeMap<String, Network>,
+    /// Address books, keyed by network.
+    pub addresses: BTreeMap<String, BTreeMap<String, String>>,
+    /// Remediation signer keys, keyed by network. Kept unexpanded until resolved.
+    pub signer_keys: BTreeMap<String, String>,
     pub accounts: BTreeMap<String, Vec<Account>>,
+    /// RPC sources, keyed by network.
+    pub rpcs: BTreeMap<String, Rpc>,
+    /// Subgraph sources, keyed by the network they index.
+    pub subgraph_sources: BTreeMap<String, SubgraphSource>,
     pub gateway: Gateway,
     pub subgraphs: BTreeMap<String, Vec<Subgraph>>,
     /// Human-readable list of the layers actually loaded, for error messages.
@@ -329,39 +384,34 @@ impl Config {
     fn merge(&mut self, raw: RawConfig, source: Source, label: &str) -> Result<()> {
         self.sources.push(label.to_string());
 
-        if let Some(n) = raw.default_network {
-            self.default_network = Some(n);
+        if raw.default_network.is_some() {
+            return Err(ConfigError::DefaultNetworkRemoved {
+                layer: label.to_string(),
+            }
+            .into());
         }
 
-        // Networks merge per key: setting one rpc_url in user config must not discard the
-        // shipped address book for that network.
-        for (name, rn) in raw.networks {
-            let entry = self.networks.entry(name).or_default();
-            if let Some(id) = rn.chain_id {
-                entry.chain_id = Some(id);
+        if raw.networks.is_some() {
+            return Err(ConfigError::NetworksRemoved {
+                layer: label.to_string(),
             }
-            if let Some(url) = rn.rpc_url {
-                entry.rpc_url = Some(url);
-            }
-            if let Some(key) = rn.signer_key {
+            .into());
+        }
+
+        // Address books merge per entry: adding one name in user config must not discard the
+        // shipped book for that network.
+        for (network, book) in raw.addresses {
+            self.addresses.entry(network).or_default().extend(book);
+        }
+
+        for (network, r) in raw.remediation {
+            if let Some(key) = r.signer_key {
                 // A key in the embedded default would ship inside the binary. Refusing it here
                 // makes that impossible rather than merely discouraged.
                 if source == Source::Default {
                     return Err(ConfigError::SignerKeyInDefaults.into());
                 }
-                entry.signer_key = Some(key);
-            }
-            if let Some(lag) = rn.max_lag {
-                entry.max_lag = Some(lag);
-            }
-            if let Some(c) = rn.max_concurrency {
-                entry.max_concurrency = Some(c);
-            }
-            if let Some(r) = rn.max_log_range {
-                entry.max_log_range = Some(r);
-            }
-            for (k, v) in rn.addresses {
-                entry.addresses.insert(k, v);
+                self.signer_keys.insert(network, key);
             }
         }
 
@@ -408,6 +458,49 @@ impl Config {
             }
         }
 
+        let raw_sources = raw.sources.unwrap_or_default();
+
+        // Subgraph sources merge per key as well.
+        for (name, rs) in raw_sources.subgraph {
+            let entry = self.subgraph_sources.entry(name).or_default();
+            // Setting one target replaces the others: a user pointing a shipped source at
+            // their own graph-node must not end up with two targets and an error.
+            if rs.id.is_some() || rs.deployment.is_some() || rs.url.is_some() {
+                entry.id = rs.id;
+                entry.deployment = rs.deployment;
+                entry.url = rs.url;
+            }
+            if let Some(l) = rs.label {
+                entry.label = Some(l);
+            }
+            if let Some(lag) = rs.max_lag {
+                entry.max_lag = Some(lag);
+            }
+            if let Some(e) = rs.enabled {
+                entry.enabled = Some(e);
+            }
+        }
+
+        // RPC sources merge per key too: overriding one url keeps the shipped max_lag.
+        for (name, rr) in raw_sources.rpc {
+            let entry = self.rpcs.entry(name).or_default();
+            if let Some(url) = rr.url {
+                entry.url = Some(url);
+            }
+            if let Some(id) = rr.chain_id {
+                entry.chain_id = Some(id);
+            }
+            if let Some(lag) = rr.max_lag {
+                entry.max_lag = Some(lag);
+            }
+            if let Some(c) = rr.max_concurrency {
+                entry.max_concurrency = Some(c);
+            }
+            if let Some(r) = rr.max_log_range {
+                entry.max_log_range = Some(r);
+            }
+        }
+
         if let Some(g) = raw.gateway {
             if let Some(url) = g.url {
                 self.gateway.url = Some(url);
@@ -451,49 +544,89 @@ impl Config {
         Ok(())
     }
 
-    /// Pick a network and turn strings into typed values.
-    pub fn resolve(&self, network: Option<&str>, rpc_override: Option<&str>) -> Result<Resolved> {
-        let name = network
-            .map(str::to_string)
-            .or_else(|| self.default_network.clone())
-            .ok_or(ConfigError::NoNetworkSelected {
-                no_defaults: !self.used_defaults,
-            })?;
+    /// Turn strings into typed values, for every network that has something to watch.
+    ///
+    /// There is no main network: every network with accounts runs, and so does every network
+    /// whose subgraphs have an RPC to be measured against. `only` narrows the run to one
+    /// network, and `rpc_override` replaces that one network's RPC url.
+    pub fn resolve(&self, only: Option<&str>, rpc_override: Option<&str>) -> Result<Resolved> {
+        let has_rpc = |n: &str| self.rpcs.get(n).is_some_and(|r| r.url.is_some());
 
-        let net = self
-            .networks
-            .get(&name)
-            .ok_or_else(|| ConfigError::UnknownNetwork {
-                name: name.clone(),
-                available: self.networks.keys().cloned().collect(),
-            })?;
-
-        let chain_id = net.chain_id.ok_or_else(|| ConfigError::MissingChainId {
-            network: name.clone(),
-        })?;
-
-        let rpc_url = match rpc_override {
-            Some(url) => url.to_string(),
-            None => {
-                let raw = net
-                    .rpc_url
-                    .as_deref()
-                    .ok_or_else(|| ConfigError::MissingRpcUrl {
-                        network: name.clone(),
-                    })?;
-                expand_env(raw, &format!("networks.{name}.rpc_url"))?
+        let mut names: std::collections::BTreeSet<String> = self
+            .accounts
+            .iter()
+            .filter(|(_, accounts)| accounts.iter().any(|a| a.enabled))
+            .map(|(n, _)| n.clone())
+            .collect();
+        for (network, list) in &self.subgraphs {
+            if list.iter().any(|s| s.enabled) && has_rpc(network) {
+                names.insert(network.clone());
             }
-        };
+        }
 
-        let max_lag = match &net.max_lag {
-            Some(raw) => parse_duration(raw, &format!("networks.{name}.max_lag"))?,
-            None => default_max_lag(chain_id),
-        };
+        if let Some(want) = only {
+            let known = self.addresses.contains_key(want)
+                || self.accounts.contains_key(want)
+                || self.subgraphs.contains_key(want)
+                || self.rpcs.contains_key(want);
+            if !known {
+                let mut available: std::collections::BTreeSet<String> =
+                    self.rpcs.keys().cloned().collect();
+                available.extend(names.iter().cloned());
+                return Err(ConfigError::UnknownNetwork {
+                    name: want.to_string(),
+                    available: available.into_iter().collect(),
+                }
+                .into());
+            }
+            names = [want.to_string()].into();
+        }
+
+        if rpc_override.is_some() && names.len() != 1 {
+            return Err(ConfigError::RpcOverrideNeedsNetwork {
+                networks: names.into_iter().collect(),
+            }
+            .into());
+        }
+
+        let mut networks = Vec::new();
+        for name in &names {
+            networks.push(self.resolve_network(name, rpc_override)?);
+        }
+
+        let mut subgraphs = self.resolve_subgraphs()?;
+        let mut subgraph_sources = self.resolve_subgraph_sources()?;
+        if let Some(want) = only {
+            subgraphs.retain(|s| s.network == want);
+            subgraph_sources.retain(|s| s.network == want);
+        }
+
+        if networks.iter().all(|n| n.accounts.is_empty()) && subgraphs.is_empty() {
+            return Err(ConfigError::NothingToWatch {
+                sources: self.sources.clone(),
+            }
+            .into());
+        }
+
+        Ok(Resolved {
+            networks,
+            subgraph_sources,
+            subgraphs,
+            sources: self.sources.clone(),
+            used_defaults: self.used_defaults,
+        })
+    }
+
+    /// One network: its chain, its RPC, its address book and its accounts.
+    fn resolve_network(&self, name: &str, rpc_override: Option<&str>) -> Result<ResolvedNetwork> {
+        let name = name.to_string();
+        let rpc = self.resolve_rpc(&name, rpc_override)?;
+        let chain_id = rpc.chain_id;
 
         // The address book resolves first, so everything downstream can refer to it by name.
         let mut addresses = BTreeMap::new();
-        for (key, value) in &net.addresses {
-            let field = format!("networks.{name}.addresses.{key}");
+        for (key, value) in self.addresses.get(&name).into_iter().flatten() {
+            let field = format!("addresses.{name}.{key}");
             let expanded = expand_env(value, &field)?;
             addresses.insert(key.clone(), parse_address(&expanded, &field)?);
         }
@@ -617,54 +750,81 @@ impl Config {
             });
         }
 
-        let signer_key = match &net.signer_key {
-            Some(raw) => Some(expand_env(raw, &format!("networks.{name}.signer_key"))?),
+        let signer_key = match self.signer_keys.get(&name) {
+            Some(raw) => Some(expand_env(raw, &format!("remediation.{name}.signer_key"))?),
             None => None,
         };
 
-        let subgraphs = self.resolve_subgraphs(&name)?;
-
-        Ok(Resolved {
-            network: name,
+        Ok(ResolvedNetwork {
+            name,
             chain_id,
-            rpc_url,
+            rpc,
             signer_key,
-            max_concurrency: net
-                .max_concurrency
-                .unwrap_or(crate::rpc::DEFAULT_MAX_IN_FLIGHT),
-            max_log_range: net.max_log_range.unwrap_or(crate::rpc::DEFAULT_LOG_RANGE),
-            max_lag,
             addresses,
             accounts: resolved_accounts,
-            subgraphs,
-            sources: self.sources.clone(),
             used_defaults: self.used_defaults,
         })
     }
 
-    /// Subgraphs indexing `network`, enabled ones only.
+    /// The RPC source for `network`, with the chain id it must report.
+    fn resolve_rpc(&self, network: &str, url_override: Option<&str>) -> Result<ResolvedRpc> {
+        let rpc = self.rpcs.get(network).cloned().unwrap_or_default();
+        // Configured wins, so a well-known name can still be pointed somewhere unusual.
+        let chain_id = rpc
+            .chain_id
+            .or_else(|| crate::source::known_chain_id(network))
+            .ok_or_else(|| ConfigError::MissingChainId {
+                network: network.to_string(),
+            })?;
+        let field = format!("sources.rpc.{network}");
+
+        let url = match url_override {
+            Some(url) => url.to_string(),
+            None => {
+                let raw = rpc
+                    .url
+                    .as_deref()
+                    .ok_or_else(|| ConfigError::MissingRpcUrl {
+                        network: network.to_string(),
+                    })?;
+                expand_env(raw, &format!("{field}.url"))?
+            }
+        };
+        let max_lag = match &rpc.max_lag {
+            Some(raw) => parse_duration(raw, &format!("{field}.max_lag"))?,
+            None => default_max_lag(chain_id),
+        };
+
+        Ok(ResolvedRpc {
+            network: network.to_string(),
+            chain_id,
+            url,
+            max_lag,
+            max_concurrency: rpc
+                .max_concurrency
+                .unwrap_or(crate::rpc::DEFAULT_MAX_IN_FLIGHT),
+            max_log_range: rpc.max_log_range.unwrap_or(crate::rpc::DEFAULT_LOG_RANGE),
+        })
+    }
+
+    /// Every enabled subgraph, whichever chain it indexes.
+    ///
+    /// Not just the selected network's: a subgraph is a component of The Graph network, and
+    /// checking it needs only the gateway. The chain matters for one number, blocks behind,
+    /// which is measured only when that chain's RPC is configured.
     ///
     /// An unset `${GRAPH_API_KEY}` is not a config error here. The shipped config may list
     /// subgraphs, and someone checking balances without a key should still be able to; those
     /// subgraphs report unreadable and say why.
-    fn resolve_subgraphs(&self, network: &str) -> Result<Vec<ResolvedSubgraph>> {
-        let base = self
-            .gateway
-            .url
-            .clone()
-            .unwrap_or_else(|| DEFAULT_GATEWAY_URL.to_string());
-        let base = expand_env(&base, "gateway.url")?;
-        let base = base.trim_end_matches('/');
-
-        let api_key = match &self.gateway.api_key {
-            Some(raw) => expand_env(raw, "gateway.api_key")
-                .map(crate::subgraph::Secret::new)
-                .map_err(|e| e.to_string()),
-            None => Err("no gateway.api_key configured".to_string()),
-        };
+    fn resolve_subgraphs(&self) -> Result<Vec<ResolvedSubgraph>> {
+        let gateway = self.gateway_endpoints()?;
 
         let mut out = Vec::new();
-        for sg in self.subgraphs.get(network).into_iter().flatten() {
+        for (network, sg) in self
+            .subgraphs
+            .iter()
+            .flat_map(|(network, list)| list.iter().map(move |sg| (network, sg)))
+        {
             if !sg.enabled {
                 continue;
             }
@@ -711,15 +871,7 @@ impl Config {
                 None => DEFAULT_SUBGRAPH_MAX_LAG,
             };
 
-            let gateway = |path: String| {
-                api_key
-                    .clone()
-                    .map(|key| crate::subgraph::Endpoint {
-                        url: format!("{base}/{path}"),
-                        bearer: Some(key),
-                    })
-                    .map_err(|reason| format!("{reason} (needed for the gateway)"))
-            };
+            let gateway = |path: String| gateway.endpoint(&path);
 
             // The subgraph itself: whatever version is published, or a direct endpoint.
             let endpoint = match (&sg.id, &sg.url) {
@@ -730,10 +882,10 @@ impl Config {
                 _ => unreachable!("exactly one target was checked above"),
             };
             out.push(ResolvedSubgraph {
-                label: sg.label.clone(),
+                network: network.clone(),
                 subgraph: sg.label.clone(),
+                deployment: None,
                 endpoint,
-                expected_deployment: None,
                 max_lag,
                 source: sg.source,
             });
@@ -741,10 +893,10 @@ impl Config {
             // Then each listed deployment, checked on its own under the same umbrella.
             for d in &sg.deployments {
                 out.push(ResolvedSubgraph {
-                    label: format!("{}@{d}", sg.label),
+                    network: network.clone(),
                     subgraph: sg.label.clone(),
+                    deployment: Some(d.clone()),
                     endpoint: gateway(format!("deployments/id/{d}")),
-                    expected_deployment: Some(d.clone()),
                     max_lag,
                     source: sg.source,
                 });
@@ -753,12 +905,81 @@ impl Config {
         Ok(out)
     }
 
-    /// Network name for a chain id, used to make chain-id mismatches legible.
-    pub fn network_name_for_chain(&self, chain_id: u64) -> Option<String> {
-        self.networks
-            .iter()
-            .find(|(_, n)| n.chain_id == Some(chain_id))
-            .map(|(name, _)| name.clone())
+    /// The gateway's base URL and key, shared by every subgraph queried through it.
+    fn gateway_endpoints(&self) -> Result<GatewayEndpoints> {
+        let base = self
+            .gateway
+            .url
+            .clone()
+            .unwrap_or_else(|| DEFAULT_GATEWAY_URL.to_string());
+        let base = expand_env(&base, "gateway.url")?
+            .trim_end_matches('/')
+            .to_string();
+        let api_key = match &self.gateway.api_key {
+            Some(raw) => expand_env(raw, "gateway.api_key")
+                .map(crate::subgraph::Secret::new)
+                .map_err(|e| e.to_string()),
+            None => Err("no gateway.api_key configured".to_string()),
+        };
+        Ok(GatewayEndpoints { base, api_key })
+    }
+
+    /// Subgraphs the tool reads from.
+    ///
+    /// Like watched subgraphs, a missing API key is not a config error: the source reports
+    /// itself down with the reason, and everything that does not depend on it still runs.
+    fn resolve_subgraph_sources(&self) -> Result<Vec<ResolvedSubgraphSource>> {
+        let gateway = self.gateway_endpoints()?;
+        let mut out = Vec::new();
+        for (network, src) in &self.subgraph_sources {
+            if src.enabled == Some(false) {
+                continue;
+            }
+            let field = format!("sources.subgraph.{network}");
+            let targets = [&src.id, &src.deployment, &src.url]
+                .iter()
+                .filter(|t| t.is_some())
+                .count();
+            if targets != 1 {
+                return Err(ConfigError::InvalidValue {
+                    field,
+                    value: format!("{targets} targets"),
+                    reason: "set exactly one of id, deployment or url".to_string(),
+                }
+                .into());
+            }
+            if let Some(d) = &src.deployment {
+                if !d.starts_with("Qm") {
+                    return Err(ConfigError::InvalidValue {
+                        field: format!("{field}.deployment"),
+                        value: d.clone(),
+                        reason: "a deployment id starts with Qm; the subgraph id goes in `id`"
+                            .to_string(),
+                    }
+                    .into());
+                }
+            }
+            let endpoint = match (&src.id, &src.deployment, &src.url) {
+                (Some(id), _, _) => gateway.endpoint(&format!("subgraphs/id/{id}")),
+                (_, Some(d), _) => gateway.endpoint(&format!("deployments/id/{d}")),
+                (_, _, Some(url)) => expand_env(url, &format!("{field}.url"))
+                    .map(|url| crate::subgraph::Endpoint { url, bearer: None })
+                    .map_err(|e| e.to_string()),
+                _ => unreachable!("exactly one target was checked above"),
+            };
+            let max_lag = match &src.max_lag {
+                Some(raw) => parse_duration(raw, &format!("{field}.max_lag"))?,
+                None => DEFAULT_SUBGRAPH_MAX_LAG,
+            };
+            out.push(ResolvedSubgraphSource {
+                name: src.label.clone().unwrap_or_else(|| network.clone()),
+                network: network.clone(),
+                endpoint,
+                deployment: src.deployment.clone(),
+                max_lag,
+            });
+        }
+        Ok(out)
     }
 }
 
@@ -820,56 +1041,117 @@ impl ResolvedAccount {
     }
 }
 
+/// The gateway, ready to build endpoints from.
+struct GatewayEndpoints {
+    base: String,
+    api_key: std::result::Result<crate::subgraph::Secret, String>,
+}
+
+impl GatewayEndpoints {
+    fn endpoint(&self, path: &str) -> std::result::Result<crate::subgraph::Endpoint, String> {
+        self.api_key
+            .clone()
+            .map(|key| crate::subgraph::Endpoint {
+                url: format!("{}/{path}", self.base),
+                bearer: Some(key),
+            })
+            .map_err(|reason| format!("{reason} (needed for the gateway)"))
+    }
+}
+
+/// A subgraph the tool reads from, resolved.
 #[derive(Debug, Clone)]
-pub struct ResolvedSubgraph {
-    /// Unique per check: `network` for the subgraph itself, `network@Qm…` for a deployment.
-    pub label: String,
-    /// The configured entry this check came from.
-    pub subgraph: String,
+pub struct ResolvedSubgraphSource {
+    /// The label, or the network when none is set. Shown as `subgraph:<name>`.
+    pub name: String,
+    /// The chain it indexes.
+    pub network: String,
     /// The query endpoint, or why there is none.
     pub endpoint: std::result::Result<crate::subgraph::Endpoint, String>,
-    pub expected_deployment: Option<String>,
+    /// Set when pinned: anything else answering is a fault.
+    pub deployment: Option<String>,
+    pub max_lag: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedSubgraph {
+    /// The chain the subgraph indexes.
+    pub network: String,
+    /// The configured label.
+    pub subgraph: String,
+    /// A listed deployment this check asks for. `None` checks the published version.
+    pub deployment: Option<String>,
+    /// The query endpoint, or why there is none.
+    pub endpoint: std::result::Result<crate::subgraph::Endpoint, String>,
     pub max_lag: Duration,
     pub source: Source,
 }
 
+impl ResolvedSubgraph {
+    /// `network` for the published version, `network@Qm…` for a listed deployment.
+    pub fn name(&self) -> String {
+        match &self.deployment {
+            Some(d) => format!("{}@{d}", self.subgraph),
+            None => self.subgraph.clone(),
+        }
+    }
+}
+
+/// An RPC source, resolved: the endpoint and the chain it must prove it serves.
 #[derive(Clone)]
-pub struct Resolved {
+pub struct ResolvedRpc {
     pub network: String,
     pub chain_id: u64,
-    pub rpc_url: String,
-    /// Redacted everywhere it could be printed; see `Resolved`'s Debug impl.
-    pub signer_key: Option<String>,
+    pub url: String,
+    pub max_lag: Duration,
     /// Requests in flight against this endpoint at once.
     pub max_concurrency: usize,
     /// Largest `eth_getLogs` span to attempt against this endpoint.
     pub max_log_range: u64,
-    pub max_lag: Duration,
+}
+
+/// Hand-written: RPC URLs often carry an API key in the path.
+impl std::fmt::Debug for ResolvedRpc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedRpc")
+            .field("network", &self.network)
+            .field("chain_id", &self.chain_id)
+            .finish()
+    }
+}
+
+/// One network, resolved: everything needed to read and watch it.
+#[derive(Clone)]
+pub struct ResolvedNetwork {
+    pub name: String,
+    pub chain_id: u64,
+    /// The RPC everything on this network is read through.
+    pub rpc: ResolvedRpc,
+    /// Redacted everywhere it could be printed; see the Debug impl.
+    pub signer_key: Option<String>,
     pub addresses: BTreeMap<String, Address>,
+    /// Empty for a network that runs only so its subgraphs can be measured.
     pub accounts: Vec<ResolvedAccount>,
-    pub subgraphs: Vec<ResolvedSubgraph>,
-    pub sources: Vec<String>,
-    pub used_defaults: bool,
+    used_defaults: bool,
 }
 
 /// Hand-written so a signer key can never reach a log line, a panic message, or `{:?}`.
-impl std::fmt::Debug for Resolved {
+impl std::fmt::Debug for ResolvedNetwork {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Resolved")
-            .field("network", &self.network)
+        f.debug_struct("ResolvedNetwork")
+            .field("name", &self.name)
             .field("chain_id", &self.chain_id)
-            .field("rpc_url", &self.rpc_url)
+            .field("rpc", &self.rpc)
             .field(
                 "signer_key",
                 &self.signer_key.as_ref().map(|_| "<redacted>"),
             )
             .field("accounts", &self.accounts.len())
-            .field("subgraphs", &self.subgraphs.len())
             .finish()
     }
 }
 
-impl Resolved {
+impl ResolvedNetwork {
     /// Look up an address-book entry by name.
     pub fn address_of(&self, name: &str) -> Option<Address> {
         self.addresses.get(name).copied()
@@ -879,22 +1161,11 @@ impl Resolved {
     pub fn graph_token(&self) -> Result<Address> {
         self.address_of("GraphToken").ok_or_else(|| {
             ConfigError::MissingGraphToken {
-                network: self.network.clone(),
+                network: self.name.clone(),
                 no_defaults: !self.used_defaults,
             }
             .into()
         })
-    }
-
-    pub fn require_accounts(&self) -> Result<&[ResolvedAccount]> {
-        if self.accounts.is_empty() {
-            return Err(ConfigError::NoAccounts {
-                network: self.network.clone(),
-                sources: self.sources.clone(),
-            }
-            .into());
-        }
-        Ok(&self.accounts)
     }
 
     /// Prefer a configured Multicall3 over the canonical deployment, so a chain that put it
@@ -903,19 +1174,30 @@ impl Resolved {
         self.address_of("Multicall3")
             .unwrap_or(crate::rpc::CANONICAL_MULTICALL3)
     }
+}
 
-    /// Groups present, in first-seen order, with ungrouped accounts last.
-    pub fn groups(&self) -> Vec<Option<String>> {
-        let mut out: Vec<Option<String>> = Vec::new();
-        for acc in &self.accounts {
-            if acc.group.is_some() && !out.contains(&acc.group) {
-                out.push(acc.group.clone());
-            }
-        }
-        if self.accounts.iter().any(|a| a.group.is_none()) {
-            out.push(None);
-        }
-        out
+#[derive(Debug, Clone)]
+pub struct Resolved {
+    /// Every network that runs, in name order.
+    pub networks: Vec<ResolvedNetwork>,
+    /// Subgraphs the tool reads from.
+    pub subgraph_sources: Vec<ResolvedSubgraphSource>,
+    pub subgraphs: Vec<ResolvedSubgraph>,
+    /// The config layers loaded, for messages.
+    pub sources: Vec<String>,
+    pub used_defaults: bool,
+}
+
+impl Resolved {
+    pub fn network(&self, name: &str) -> Option<&ResolvedNetwork> {
+        self.networks.iter().find(|n| n.name == name)
+    }
+
+    /// Every account on every network.
+    pub fn accounts(&self) -> impl Iterator<Item = (&ResolvedNetwork, &ResolvedAccount)> {
+        self.networks
+            .iter()
+            .flat_map(|n| n.accounts.iter().map(move |a| (n, a)))
     }
 }
 
@@ -1117,13 +1399,10 @@ mod tests {
     use crate::error::Error;
 
     const DEFAULTS: &str = r#"
-default_network = "arbitrum-one"
+[sources.rpc.arbitrum-one]
+url = "https://shipped.example/rpc"
 
-[networks.arbitrum-one]
-chain_id = 42161
-rpc_url = "https://shipped.example/rpc"
-
-[networks.arbitrum-one.addresses]
+[addresses.arbitrum-one]
 GraphToken = "0x9623063377AD1B27544C965cCd7342f7EA7e88C7"
 PaymentsEscrow = "0x1111111111111111111111111111111111111111"
 BillingWallet = "0x2222222222222222222222222222222222222222"
@@ -1133,6 +1412,16 @@ address = "BillingWallet"
 group = "billing"
 watch = ["eth"]
 "#;
+
+    /// The Arbitrum network from a resolved config, for tests about one network.
+    fn arb(config: &Config) -> ResolvedNetwork {
+        config
+            .resolve(None, None)
+            .unwrap()
+            .network("arbitrum-one")
+            .expect("arbitrum-one runs")
+            .clone()
+    }
 
     fn load(user: &str) -> Config {
         Config::from_layers(&[
@@ -1144,7 +1433,7 @@ watch = ["eth"]
 
     #[test]
     fn account_takes_its_name_from_the_address_book() {
-        let resolved = load("").resolve(None, None).unwrap();
+        let resolved = arb(&load(""));
         assert_eq!(resolved.accounts[0].label, "BillingWallet");
         assert_eq!(
             resolved.accounts[0].address,
@@ -1165,7 +1454,7 @@ address = "PaymentsEscrow"
 group = "billing"
 "#,
         );
-        let resolved = config.resolve(None, None).unwrap();
+        let resolved = arb(&config);
         let escrow = resolved
             .accounts
             .iter()
@@ -1189,9 +1478,7 @@ address = "PaymentsEscrow"
 watch = ["grt"]
 "#,
         );
-        let acc = config
-            .resolve(None, None)
-            .unwrap()
+        let acc = arb(&config)
             .accounts
             .into_iter()
             .find(|a| a.label == "PaymentsEscrow")
@@ -1229,9 +1516,7 @@ top_up_by = "30000"
 from = "BillingWallet"
 "#,
         );
-        let acc = config
-            .resolve(None, None)
-            .unwrap()
+        let acc = arb(&config)
             .accounts
             .into_iter()
             .find(|a| a.label == "PaymentsEscrow")
@@ -1244,7 +1529,7 @@ from = "BillingWallet"
 
     #[test]
     fn remediation_is_absent_unless_configured() {
-        let resolved = load("").resolve(None, None).unwrap();
+        let resolved = arb(&load(""));
         let acc = &resolved.accounts[0];
         assert!(acc.eth_remediate.is_none());
         assert!(acc.grt_remediate.is_none());
@@ -1263,7 +1548,7 @@ address = "PaymentsEscrow"
 watch = ["grt"]
 "#,
         );
-        let resolved = config.resolve(None, None).unwrap();
+        let resolved = arb(&config);
         assert_eq!(resolved.accounts.len(), 2);
         let billing = &resolved.accounts[0];
         assert_eq!(billing.label, "BillingWallet");
@@ -1275,12 +1560,12 @@ watch = ["grt"]
     fn per_key_merge_keeps_shipped_addresses() {
         let config = load(
             r#"
-[networks.arbitrum-one]
-rpc_url = "https://mine.example/rpc"
+[sources.rpc.arbitrum-one]
+url = "https://mine.example/rpc"
 "#,
         );
-        let resolved = config.resolve(None, None).unwrap();
-        assert_eq!(resolved.rpc_url, "https://mine.example/rpc");
+        let resolved = arb(&config);
+        assert_eq!(resolved.rpc.url, "https://mine.example/rpc");
         assert!(resolved.address_of("GraphToken").is_some());
         assert!(resolved.address_of("PaymentsEscrow").is_some());
     }
@@ -1294,24 +1579,130 @@ address = "BillingWallet"
 enabled = false
 "#,
         );
-        assert!(config.resolve(None, None).unwrap().accounts.is_empty());
+        // The only account was disabled, so there is nothing left to watch at all.
+        let err = config.resolve(None, None).unwrap_err().to_string();
+        assert!(err.contains("nothing to watch"), "{err}");
     }
 
     #[test]
     fn max_lag_defaults_by_chain_and_can_be_overridden() {
-        let resolved = load("").resolve(None, None).unwrap();
-        assert_eq!(resolved.max_lag, Duration::from_secs(60)); // Arbitrum default
+        let resolved = arb(&load(""));
+        assert_eq!(resolved.rpc.max_lag, Duration::from_secs(60)); // Arbitrum default
 
         let config = load(
             r#"
-[networks.arbitrum-one]
+[sources.rpc.arbitrum-one]
 max_lag = "5m"
 "#,
         );
+        let rpc = arb(&config).rpc;
+        assert_eq!(rpc.max_lag, Duration::from_secs(300));
+        // Per-key: overriding max_lag keeps the shipped url.
+        assert_eq!(rpc.url, "https://shipped.example/rpc");
+    }
+
+    #[test]
+    fn a_networks_block_says_where_its_parts_went() {
+        // The old shape must fail loudly, naming the new places, not be ignored.
+        for body in [
+            "[networks.arbitrum-one]\nchain_id = 42161\n",
+            "[networks.arbitrum-one.addresses]\nX = \"0x7777777777777777777777777777777777777777\"\n",
+            "[networks.arbitrum-one]\nrpc_url = \"http://x\"\n",
+        ] {
+            let err = Config::from_layers(&[
+                ("<defaults>", DEFAULTS, Source::Default),
+                ("<user>", body, Source::User),
+            ])
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("[addresses.X]"), "{err}");
+            assert!(err.contains("[remediation.X]"), "{err}");
+            assert!(err.contains("<user>"), "{err}");
+        }
+    }
+
+    #[test]
+    fn chain_ids_are_built_in_for_known_networks_and_configurable_for_others() {
+        // Known: nothing to configure beyond the url.
+        let known = load("[sources.rpc.gnosis]\nurl = \"http://g\"\n[[accounts.gnosis]]\naddress = \"0x7777777777777777777777777777777777777777\"\nwatch = [\"eth\"]\n");
+        let resolved = known.resolve(Some("gnosis"), None).unwrap();
+        assert_eq!(resolved.networks[0].chain_id, 100);
+
+        // Unknown: an error that says what to add, then it works once added.
+        let devnet = "[sources.rpc.devnet]\nurl = \"http://d\"\n[[accounts.devnet]]\naddress = \"0x7777777777777777777777777777777777777777\"\nwatch = [\"eth\"]\n";
+        let err = load(devnet)
+            .resolve(Some("devnet"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("chain_id"), "{err}");
+        let fixed =
+            load(&devnet.replace("url = \"http://d\"", "url = \"http://d\"\nchain_id = 31337"));
         assert_eq!(
-            config.resolve(None, None).unwrap().max_lag,
-            Duration::from_secs(300)
+            fixed.resolve(Some("devnet"), None).unwrap().networks[0].chain_id,
+            31337
         );
+
+        // Configured wins over built in.
+        let odd = load("[sources.rpc.arbitrum-one]\nchain_id = 999\n");
+        assert_eq!(arb(&odd).chain_id, 999);
+    }
+
+    #[test]
+    fn signer_keys_live_under_remediation() {
+        let config = load("[remediation.arbitrum-one]\nsigner_key = \"0xabc\"\n");
+        assert_eq!(arb(&config).signer_key.as_deref(), Some("0xabc"));
+        assert!(!format!("{:?}", arb(&config)).contains("0xabc"));
+
+        let shipped = Config::from_layers(&[(
+            "<defaults>",
+            &format!("{DEFAULTS}\n[remediation.arbitrum-one]\nsigner_key = \"0xabc\"\n"),
+            Source::Default,
+        )]);
+        assert!(shipped.is_err());
+    }
+
+    #[test]
+    fn another_chains_rpc_is_resolved_only_for_its_subgraphs() {
+        let with_subgraph = r#"
+[sources.rpc.gnosis]
+url = "https://gnosis.example"
+[sources.rpc.unused]
+url = "${GN_TEST_DEFINITELY_UNSET}"
+[[subgraphs.gnosis]]
+label = "qos"
+url = "https://graph-node.example/qos"
+"#;
+        let resolved = load(with_subgraph).resolve(None, None).unwrap();
+        let networks: Vec<(&str, u64)> = resolved
+            .networks
+            .iter()
+            .map(|n| (n.name.as_str(), n.chain_id))
+            .collect();
+        // `unused` has neither accounts nor subgraphs, so its unset env var never matters.
+        assert_eq!(networks, [("arbitrum-one", 42161), ("gnosis", 100)]);
+        // Gnosis's default max_lag comes from its chain id, not Arbitrum's.
+        let gnosis = resolved.network("gnosis").unwrap();
+        assert_eq!(gnosis.rpc.max_lag, Duration::from_secs(120));
+        assert!(gnosis.accounts.is_empty());
+
+        // A chain with subgraphs but no RPC is fine: those subgraphs just have no block gap.
+        let no_rpc = load(
+            "[[subgraphs.gnosis]]\nlabel = \"qos\"\nurl = \"https://graph-node.example/qos\"\n",
+        )
+        .resolve(None, None)
+        .unwrap();
+        assert!(no_rpc.network("gnosis").is_none());
+        assert_eq!(no_rpc.subgraphs.len(), 1);
+    }
+
+    #[test]
+    fn rpc_debug_output_never_shows_the_url() {
+        // Providers put API keys in the path.
+        let resolved =
+            load("[sources.rpc.arbitrum-one]\nurl = \"https://rpc.example/secret-key-123\"\n")
+                .resolve(None, None)
+                .unwrap();
+        assert!(!format!("{resolved:?}").contains("secret-key-123"));
     }
 
     #[test]
@@ -1369,17 +1760,19 @@ spender = "NoSuchThing"
             "<user>",
             r#"
 use_defaults = false
-default_network = "local"
-[networks.local]
+[sources.rpc.local]
+url = "http://127.0.0.1:8545"
 chain_id = 1337
-rpc_url = "http://127.0.0.1:8545"
+[[accounts.local]]
+address = "0x7777777777777777777777777777777777777777"
+watch = ["grt"]
 "#,
             Source::User,
         )])
         .unwrap();
-        assert!(!config.networks.contains_key("arbitrum-one"));
+        assert!(!config.addresses.contains_key("arbitrum-one"));
         let resolved = config.resolve(None, None).unwrap();
-        let msg = resolved.graph_token().unwrap_err().to_string();
+        let msg = resolved.networks[0].graph_token().unwrap_err().to_string();
         assert!(msg.contains("GraphToken"), "{msg}");
         assert!(msg.contains("use_defaults"), "{msg}");
     }
@@ -1388,57 +1781,86 @@ rpc_url = "http://127.0.0.1:8545"
     fn unused_network_with_unset_env_var_does_not_break_the_active_one() {
         let config = load(
             r#"
-[networks.arbitrum-sepolia]
-chain_id = 421614
-rpc_url = "${GN_TEST_DEFINITELY_UNSET}"
-"#,
-        );
-        assert_eq!(
-            config.resolve(Some("arbitrum-one"), None).unwrap().chain_id,
-            42161
-        );
-    }
-
-    #[test]
-    fn groups_list_puts_ungrouped_last() {
-        let config = load(
-            r#"
-[[accounts.arbitrum-one]]
-address = "PaymentsEscrow"
-
-[[accounts.arbitrum-one]]
-address = "0x7777777777777777777777777777777777777777"
-label = "oracle-one"
-group = "oracles"
+[sources.rpc.arbitrum-sepolia]
+url = "${GN_TEST_DEFINITELY_UNSET}"
 "#,
         );
         let resolved = config.resolve(None, None).unwrap();
-        assert_eq!(
-            resolved.groups(),
-            vec![
-                Some("billing".to_string()),
-                Some("oracles".to_string()),
-                None
-            ]
-        );
+        let names: Vec<&str> = resolved.networks.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, ["arbitrum-one"]);
     }
 
     #[test]
-    fn no_accounts_error_names_the_network() {
+    fn every_network_with_something_to_watch_runs() {
+        let config = load(
+            r#"
+[sources.rpc.gnosis]
+url = "https://gnosis.example"
+[addresses.gnosis]
+Wallet = "0x7777777777777777777777777777777777777777"
+[[accounts.gnosis]]
+address = "Wallet"
+watch = ["eth"]
+"#,
+        );
+        let resolved = config.resolve(None, None).unwrap();
+        let names: Vec<&str> = resolved.networks.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, ["arbitrum-one", "gnosis"]);
+        // Accounts resolve against their own network's address book.
+        let accounts: Vec<(&str, &str)> = resolved
+            .accounts()
+            .map(|(n, a)| (n.name.as_str(), a.label.as_str()))
+            .collect();
+        assert_eq!(
+            accounts,
+            [("arbitrum-one", "BillingWallet"), ("gnosis", "Wallet")]
+        );
+
+        // --network narrows to one.
+        let only = config.resolve(Some("gnosis"), None).unwrap();
+        assert_eq!(only.networks.len(), 1);
+        assert!(config.resolve(Some("nope"), None).is_err());
+
+        // --rpc-url replaces one network's RPC, so it needs --network once two run.
+        let err = config
+            .resolve(None, Some("http://x"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--network"), "{err}");
+        let one = config.resolve(Some("gnosis"), Some("http://x")).unwrap();
+        assert_eq!(one.networks[0].rpc.url, "http://x");
+    }
+
+    #[test]
+    fn default_network_says_it_was_removed() {
+        let err = Config::from_layers(&[
+            ("<defaults>", DEFAULTS, Source::Default),
+            (
+                "<user>",
+                "default_network = \"arbitrum-one\"\n",
+                Source::User,
+            ),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("default_network has been removed"), "{err}");
+        assert!(err.contains("<user>"), "{err}");
+    }
+
+    #[test]
+    fn nothing_to_watch_is_an_error() {
         let config = Config::from_layers(&[(
             "<user>",
             r#"
-default_network = "empty-net"
-[networks.empty-net]
+[sources.rpc.empty-net]
+url = "http://localhost:8545"
 chain_id = 1
-rpc_url = "http://localhost:8545"
 "#,
             Source::User,
         )])
         .unwrap();
-        let resolved = config.resolve(None, None).unwrap();
-        let err = resolved.require_accounts().unwrap_err().to_string();
-        assert!(err.contains("empty-net"), "{err}");
+        let err = config.resolve(None, None).unwrap_err().to_string();
+        assert!(err.contains("nothing to watch"), "{err}");
     }
 
     #[test]
@@ -1483,10 +1905,7 @@ url = "http://graph-node:8000/subgraphs/name/x"
             .unwrap()
             .url
             .ends_with("/deployments/id/QmDeploymentXyz"));
-        assert_eq!(
-            deployment.expected_deployment.as_deref(),
-            Some("QmDeploymentXyz")
-        );
+        assert_eq!(deployment.deployment.as_deref(), Some("QmDeploymentXyz"));
         assert_eq!(deployment.max_lag, Duration::from_secs(300));
 
         // A direct endpoint gets no key: it is not the gateway's to receive.
@@ -1534,12 +1953,12 @@ deployments = ["QmOne", "QmTwo"]
 "#,
         );
         let subgraphs = config.resolve(None, None).unwrap().subgraphs;
-        let labels: Vec<&str> = subgraphs.iter().map(|s| s.label.as_str()).collect();
-        assert_eq!(labels, ["network", "network@QmOne", "network@QmTwo"]);
+        let names: Vec<String> = subgraphs.iter().map(|s| s.name()).collect();
+        assert_eq!(names, ["network", "network@QmOne", "network@QmTwo"]);
         assert!(subgraphs.iter().all(|s| s.subgraph == "network"));
         // The subgraph id follows whatever is published, so nothing is pinned for it.
-        assert_eq!(subgraphs[0].expected_deployment, None);
-        assert_eq!(subgraphs[1].expected_deployment.as_deref(), Some("QmOne"));
+        assert_eq!(subgraphs[0].deployment, None);
+        assert_eq!(subgraphs[1].deployment.as_deref(), Some("QmOne"));
     }
 
     #[test]
@@ -1591,6 +2010,114 @@ deployments = ["QmOne", "QmTwo"]
             .as_ref()
             .unwrap_err()
             .contains("api_key"));
+    }
+
+    #[test]
+    fn subgraphs_on_other_chains_are_checked_too() {
+        // Regression: a subgraph listed under a network other than the selected one was
+        // dropped without a word.
+        let config = load(
+            r#"
+[[subgraphs.arbitrum-one]]
+label = "network"
+id = "NetworkId"
+
+[[subgraphs.gnosis]]
+label = "qos"
+id = "QosId"
+"#,
+        );
+        let resolved = config.resolve(None, None).unwrap();
+        let chains: Vec<(&str, &str)> = resolved
+            .subgraphs
+            .iter()
+            .map(|s| (s.network.as_str(), s.subgraph.as_str()))
+            .collect();
+        assert_eq!(chains, [("arbitrum-one", "network"), ("gnosis", "qos")]);
+    }
+
+    #[test]
+    fn subgraph_sources_are_keyed_by_network() {
+        let config = load(
+            r#"
+[gateway]
+api_key = "k"
+[sources.subgraph.arbitrum-one]
+label = "monitor"
+id = "MonitorId"
+"#,
+        );
+        let resolved = config.resolve(None, None).unwrap();
+        let src = &resolved.subgraph_sources[0];
+        assert_eq!(
+            (src.name.as_str(), src.network.as_str()),
+            ("monitor", "arbitrum-one")
+        );
+        assert!(src
+            .endpoint
+            .as_ref()
+            .unwrap()
+            .url
+            .ends_with("/subgraphs/id/MonitorId"));
+        assert_eq!(src.max_lag, DEFAULT_SUBGRAPH_MAX_LAG);
+
+        // Without a label it is named after its network, like an RPC.
+        let unlabelled = load("[sources.subgraph.arbitrum-one]\nid = \"X\"\n")
+            .resolve(None, None)
+            .unwrap();
+        assert_eq!(unlabelled.subgraph_sources[0].name, "arbitrum-one");
+
+        // --network narrows sources too.
+        assert!(config
+            .resolve(Some("gnosis"), None)
+            .map(|r| r.subgraph_sources.is_empty())
+            .unwrap_or(true));
+
+        for (body, expect) in [
+            ("label = \"m\"", "exactly one"),
+            ("id = \"X\"\nurl = \"http://y\"", "exactly one"),
+            ("deployment = \"NotQm\"", "starts with Qm"),
+        ] {
+            let err = load(&format!("[sources.subgraph.arbitrum-one]\n{body}\n"))
+                .resolve(None, None)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(expect), "{body}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_user_can_repoint_a_shipped_subgraph_source() {
+        let shipped = format!(
+            "{DEFAULTS}\n[sources.subgraph.arbitrum-one]\nlabel = \"monitor\"\nid = \"Shipped\"\n"
+        );
+        // Setting `url` must replace the shipped `id`, not collide with it.
+        let config = Config::from_layers(&[
+            ("<defaults>", &shipped, Source::Default),
+            (
+                "<user>",
+                "[sources.subgraph.arbitrum-one]\nurl = \"http://graph-node/monitor\"\n",
+                Source::User,
+            ),
+        ])
+        .unwrap();
+        let src = &config.resolve(None, None).unwrap().subgraph_sources[0];
+        assert_eq!(src.name, "monitor");
+        assert_eq!(
+            src.endpoint.as_ref().unwrap().url,
+            "http://graph-node/monitor"
+        );
+
+        let off = Config::from_layers(&[
+            ("<defaults>", &shipped, Source::Default),
+            (
+                "<user>",
+                "[sources.subgraph.arbitrum-one]\nenabled = false\n",
+                Source::User,
+            ),
+        ])
+        .unwrap();
+        assert!(off.resolve(None, None).unwrap().subgraph_sources.is_empty());
     }
 
     #[test]

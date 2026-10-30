@@ -34,6 +34,8 @@ use tokio::net::TcpListener;
 const ACCOUNT_LABELS: &[&str] = &["network", "group", "account", "address"];
 const ALLOWANCE_LABELS: &[&str] = &["network", "group", "owner", "spender"];
 const WATCH_LABELS: &[&str] = &["network", "group", "account", "watch"];
+/// `deployment` is empty for the published version, and the `Qm…` id for a listed deployment.
+const SUBGRAPH_LABELS: &[&str] = &["network", "subgraph", "deployment"];
 
 pub struct Metrics {
     // Observed state.
@@ -58,7 +60,13 @@ pub struct Metrics {
     pub source_up: IntGaugeVec,
     pub source_lag_seconds: GaugeVec,
     pub source_block_height: IntGaugeVec,
-    pub source_blocks_behind: IntGaugeVec,
+
+    // Subgraphs, as monitored components of the network. Not sources: see `subgraph.rs`.
+    pub subgraph_up: IntGaugeVec,
+    pub subgraph_not_checked: IntGaugeVec,
+    pub subgraph_block_height: IntGaugeVec,
+    pub subgraph_blocks_behind: IntGaugeVec,
+    pub subgraph_lag_seconds: GaugeVec,
 
     // Remediation.
     pub remediation_threshold: GaugeVec,
@@ -182,17 +190,42 @@ impl Metrics {
             .unwrap(),
             source_block_height: register_int_gauge_vec!(
                 "gm_source_block_height",
-                "Head block height reported by the source. For a subgraph, the latest block \
-                 it has indexed",
+                "Head block height reported by the source",
                 &["network", "source"]
             )
             .unwrap(),
-            source_blocks_behind: register_int_gauge_vec!(
-                "gm_source_blocks_behind",
-                "Subgraphs only: blocks between the latest indexed block and the RPC's head. \
-                 Absent when the RPC failed verification, since there is no head to measure \
-                 against",
-                &["network", "source"]
+            subgraph_up: register_int_gauge_vec!(
+                "gm_subgraph_up",
+                "1 when the subgraph answered, from the expected deployment, without indexing \
+                 errors and within max_lag. Absent when it was not checked — see \
+                 gm_subgraph_not_checked",
+                SUBGRAPH_LABELS
+            )
+            .unwrap(),
+            subgraph_not_checked: register_int_gauge_vec!(
+                "gm_subgraph_not_checked",
+                "1 when the subgraph could not be checked for a reason on our side, such as a \
+                 missing or rejected API key. Says nothing about the subgraph itself",
+                SUBGRAPH_LABELS
+            )
+            .unwrap(),
+            subgraph_block_height: register_int_gauge_vec!(
+                "gm_subgraph_block_height",
+                "Latest block the subgraph has indexed",
+                SUBGRAPH_LABELS
+            )
+            .unwrap(),
+            subgraph_blocks_behind: register_int_gauge_vec!(
+                "gm_subgraph_blocks_behind",
+                "Blocks between the subgraph's latest indexed block and the RPC's head. Absent \
+                 when the RPC failed verification, since there is no head to measure against",
+                SUBGRAPH_LABELS
+            )
+            .unwrap(),
+            subgraph_lag_seconds: register_gauge_vec!(
+                "gm_subgraph_lag_seconds",
+                "Age of the subgraph's latest indexed block against wall clock",
+                SUBGRAPH_LABELS
             )
             .unwrap(),
             remediation_threshold: register_gauge_vec!(
@@ -254,16 +287,20 @@ impl Metrics {
             .with_label_values(&[env!("CARGO_PKG_VERSION")])
             .set(1);
 
-        let net = report.network.as_str();
-
-        // Reset so a subgraph removed from config stops exporting, and so a lag that could
-        // not be measured this cycle is absent rather than last cycle's number.
+        // Reset with the rest: a network removed from config must stop exporting.
         self.source_up.reset();
         self.source_lag_seconds.reset();
         self.source_block_height.reset();
-        self.source_blocks_behind.reset();
-        for source in std::iter::once(&report.source).chain(&report.subgraphs) {
-            let labels = [net, source.id.as_str()];
+        self.block_height.reset();
+
+        let sources = report
+            .networks
+            .iter()
+            .map(|n| &n.source)
+            .chain(&report.subgraph_sources);
+        for source in sources {
+            // Each under the chain it serves.
+            let labels = [source.network.as_str(), source.id.as_str()];
             self.source_up
                 .with_label_values(&labels)
                 .set(i64::from(source.is_up()));
@@ -272,25 +309,65 @@ impl Metrics {
                     .with_label_values(&labels)
                     .set(lag.as_secs_f64());
             }
-            if let Some(height) = source.block_height() {
+            if let Some(head) = source.head {
                 self.source_block_height
                     .with_label_values(&labels)
-                    .set(height as i64);
+                    .set(head.number as i64);
             }
-            if let Some(behind) = source.blocks_behind {
-                self.source_blocks_behind
+        }
+
+        // Reset so a subgraph removed from config stops exporting, and so a number that could
+        // not be measured this cycle is absent rather than last cycle's.
+        self.subgraph_up.reset();
+        self.subgraph_not_checked.reset();
+        self.subgraph_block_height.reset();
+        self.subgraph_blocks_behind.reset();
+        self.subgraph_lag_seconds.reset();
+        for sg in &report.subgraphs {
+            // The chain the subgraph indexes, which need not be the one this process reads.
+            let labels = [
+                sg.network.as_str(),
+                sg.subgraph.as_str(),
+                sg.deployment.as_deref().unwrap_or(""),
+            ];
+            self.subgraph_not_checked
+                .with_label_values(&labels)
+                .set(i64::from(sg.is_not_checked()));
+            // Not checked publishes no verdict: a missing key must not read as a down subgraph.
+            if sg.is_not_checked() {
+                continue;
+            }
+            self.subgraph_up
+                .with_label_values(&labels)
+                .set(i64::from(sg.is_up()));
+            if let Some(block) = sg.indexed_block {
+                self.subgraph_block_height
+                    .with_label_values(&labels)
+                    .set(block as i64);
+            }
+            if let Some(behind) = sg.blocks_behind {
+                self.subgraph_blocks_behind
                     .with_label_values(&labels)
                     .set(behind as i64);
             }
+            if let Some(lag) = sg.lag {
+                self.subgraph_lag_seconds
+                    .with_label_values(&labels)
+                    .set(lag.as_secs_f64());
+            }
         }
-        if let Some(block) = report.block {
-            self.block_height
-                .with_label_values(&[net])
-                .set(block.number as i64);
+        for net in &report.networks {
+            if let Some(block) = net.block {
+                self.block_height
+                    .with_label_values(&[net.network.as_str()])
+                    .set(block.number as i64);
+            }
         }
         self.cycle_duration.observe(report.duration.as_secs_f64());
 
         for reading in &report.readings {
+            // Each reading under its own network.
+            let net = reading.labels.network.as_str();
             let group = reading.labels.group_or_ungrouped();
             let account = reading.labels.account.as_deref().unwrap_or("");
             let address = reading

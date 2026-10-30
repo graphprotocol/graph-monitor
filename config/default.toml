@@ -4,25 +4,43 @@
 # ~/.config/graph-monitor/config.toml — per-key merging keeps everything else.
 # To ignore this file entirely, set `use_defaults = false` (or pass --no-defaults).
 
-default_network = "arbitrum-one"
-
 # ---------------------------------------------------------------------------------------
-# Networks
+# Sources
 # ---------------------------------------------------------------------------------------
+# Sources are inputs the tool reads from, keyed by the type and network they index. Each is
+# verified every cycle: it must answer with live data.
 
-[networks.arbitrum-one]
-chain_id = 42161
-rpc_url = "https://arb1.arbitrum.io/rpc"
+[sources.rpc.arbitrum-one]
+url = "https://arb1.arbitrum.io/rpc"
 # How far behind wall clock the head block may be before the source is called stale.
-# Arbitrum blocks are sub-second, so a minute is a couple of orders of magnitude of slack.
 max_lag = "60s"
 # Requests in flight. Low for the free public endpoint above, which returns 429 well before a
 # paid provider would. Activity watches search logs and are latency-bound, so raising this
 # against a real endpoint speeds them up almost linearly.
 max_concurrency = 6
 
-# Address book. Names here can be used anywhere an address is expected
-[networks.arbitrum-one.addresses]
+[sources.rpc.gnosis]
+url = "https://rpc.gnosischain.com"
+max_lag = "60s"
+max_concurrency = 6
+
+[sources.subgraph.arbitrum-one]
+label = "graph-monitor"
+id    = "9DR6unCi6gxi5CfJDszZygF4uA4j2qyTCxsJttw1CwdK"
+
+# Gateway API key, read from the environment. Without it, gateway subgraphs report
+# unreadable and everything else still runs.
+#
+# Can be set in user config file.
+# [gateway]
+# api_key = "${GRAPH_API_KEY}"
+
+# ---------------------------------------------------------------------------------------
+# Address books
+# ---------------------------------------------------------------------------------------
+# Keyed by network. Names here can be used anywhere an address is expected on that network.
+
+[addresses.arbitrum-one]
 GraphToken                = "0x9623063377AD1B27544C965cCd7342f7EA7e88C7"
 BillingWallet             = "0x05F9Eea50C6BCd46c07C8EF64566AF9a9Cc91109"
 GraphTallyWallet          = "0x6AA2Ace7Ec77C06C1DAb1b0aFaC9d56d9C9D0e50"
@@ -164,46 +182,38 @@ watch   = ["eth"]
 #   below     = "0.05"
 #   top_up_by = "0.1"
 #   from      = "FoundationBillingMultisig"
+#
+# Repairs are signed with a key set in your own config, never here:
+#
+#   [remediation.arbitrum-one]
+#   signer_key = "${GRAPH_MONITOR_SIGNER_KEY}"
 
 # ---------------------------------------------------------------------------------------
 # Subgraphs
 # ---------------------------------------------------------------------------------------
-# Gateway API key, read from the environment. Without it, gateway subgraphs report
-# unreadable and everything else still runs.
-#
-# Can be set in user config file.
-# [gateway]
-# api_key = "${GRAPH_API_KEY}"
-
-# Each entry below is checked every cycle: does it answer, and how far behind the chain is
-# it. List a subgraph under the network it indexes.
-#
-# Point each entry at its subgraph with ONE of:
-#   id  = "…"           the subgraph id; follows whatever version is currently published
-#   url = "https://…"   any GraphQL endpoint, e.g. your own graph-node
-#
-# Optional:
-#   deployments = ["Qm…", …]  specific deployments of this subgraph, each checked on its
-#                             own as well (needs `id`). Useful during an upgrade, while
-#                             the new version indexes and the old one still serves.
-#   max_lag = "15m"           the default; how stale it may get before it is down
-# TODO: fill in the ids and uncomment.
-
 [[subgraphs.arbitrum-one]]
-label = "network"
+label = "Graph Network Arbitrum"
 id    = "DZz4kDTdmzWLWsV373w2bSmoar3umKKH9y82SUKr5qmp"
 deployments = [
     "QmW7D31nx3Fp6HsHfzr61STbiZ6MCoj3XBofGQGah9VNT5",   # v2.3.3
     "QmatH4cd25ymsfCFpgKPRQQ7uCYNgarxanVQ9WCfg4Y7TZ"    # v2.3.2
 ]
 [[subgraphs.arbitrum-one]]
-label = "analytics"
+label = "Graph Analytics Arbitrum"
 id    = "AgV4u2z1BFZKSj4Go1AdQswUGW2FcAtnPhifd4V7NLVz"
 
 [[subgraphs.arbitrum-one]]
-label = "ebo"
+label = "Graph EBO Arbitrum"
 id    = "4KFYqUWRTZQ9gn7GPHC6YQ2q15chJfVrX43ezYcwkgxB"
 
 [[subgraphs.arbitrum-one]]
-label = "qos"
+label = "Graph Billing Arbitrum"
+id    = "ByuvFGbqvLd7YMsFyb4eNFZ9HrwtqJ3fex4WW3FTgkEk"
+
+[[subgraphs.arbitrum-one]]
+label = "Graph Monitoring Arbitrum"
+id    = "9DR6unCi6gxi5CfJDszZygF4uA4j2qyTCxsJttw1CwdK"
+
+[[subgraphs.gnosis]]
+label = "Gateway QoS Oracle"
 id    = "Dtr9rETvwokot4BSXaD5tECanXfqfJKcvHuaaEgPDD2D"

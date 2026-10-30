@@ -75,7 +75,24 @@ async fn run(args: Cli) -> Result<ExitCode> {
         no_defaults: global.no_defaults,
     })?;
 
+    // Every configured network runs; --network narrows it to one.
     let mut resolved = config.resolve(global.network.as_deref(), global.rpc_url.as_deref())?;
+
+    // A block number belongs to one chain. Applying 519,000,000 to Gnosis is not a question
+    // with an answer.
+    if global.block != graph_monitor_core::rpc::BlockSpec::Latest && resolved.networks.len() != 1 {
+        bail!(
+            "--block picks a height on one chain, but {} networks would run ({}); pass \
+             --network to pick one",
+            resolved.networks.len(),
+            resolved
+                .networks
+                .iter()
+                .map(|n| n.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
 
     // Narrow the account set before building watches: there is no reason to read state for
     // rows the user filtered out.
@@ -117,16 +134,17 @@ async fn run(args: Cli) -> Result<ExitCode> {
         resolved = filter_spenders(resolved, &spenders)?;
     }
 
-    let executor = build_executor(&engine_config(&resolved), &global.remediation)?;
+    let repair_configs = repair_configs(&resolved);
+    let executors = build_executors(&repair_configs, &global.remediation)?;
     let engine = Engine::new(resolved)?;
     let report = engine.run_cycle(global.block).await;
 
-    // Repairs run after every reading exists, serialised by the executor. See
+    // Repairs run after every reading exists, serialised by each network's executor. See
     // `remediate::Executor::run`.
-    let repairs = match &executor {
-        Some(exec) => exec.run(&report.readings).await,
-        None => Vec::new(),
-    };
+    let mut repairs = Vec::new();
+    for (network, exec) in &executors {
+        repairs.extend(exec.run(&readings_on(&report, network)).await);
+    }
 
     // A kind filter applies after the cycle: kinds are a property of the built watches, not of
     // config, and skipping the reads is not worth a second filter path.
@@ -141,24 +159,50 @@ async fn run(args: Cli) -> Result<ExitCode> {
     }
 
     // Caveats go to stderr: they qualify the readout without polluting it.
-    if !report.source.is_up() {
-        eprintln!(
-            "note: source {} is unavailable ({}); every watch reports unreadable",
-            report.source.id,
-            report.source.summary()
-        );
-    } else if report.unreadable().count() > 0 {
-        eprintln!(
-            "note: {} watch(es) could not be read at block {}:",
-            report.unreadable().count(),
-            report.block.map(|b| b.number).unwrap_or_default()
-        );
+    for net in &report.networks {
+        if net.source.is_up() {
+            continue;
+        }
+        if net.watches > 0 {
+            eprintln!(
+                "note: source {} is unavailable ({}); every {} watch reports unreadable",
+                net.source.id,
+                net.source.summary(),
+                net.network
+            );
+        } else {
+            eprintln!(
+                "note: source {} is unavailable ({}); {} subgraphs have no block gap this run",
+                net.source.id,
+                net.source.summary(),
+                net.network
+            );
+        }
+    }
+    for src in report.subgraph_sources.iter().filter(|s| !s.is_up()) {
+        eprintln!("note: source {} is unavailable ({})", src.id, src.summary());
+    }
+    // Watches on a dead source are already explained above; list only the ones that failed
+    // on their own.
+    let unreadable = report
+        .unreadable()
+        .filter(|r| {
+            report
+                .network(&r.labels.network)
+                .is_some_and(|n| n.source.is_up())
+        })
+        .count();
+    if unreadable > 0 {
+        eprintln!("note: {unreadable} watch(es) could not be read:");
         for line in render::unreadable_notes(&report) {
             eprintln!("  {line}");
         }
     }
     for sg in report.subgraphs_down() {
-        eprintln!("note: {} is down ({})", sg.id, sg.summary());
+        eprintln!("note: subgraph {} is down: {}", sg.name(), sg.summary());
+    }
+    for sg in report.subgraphs_not_checked() {
+        eprintln!("note: subgraph {} was {}", sg.name(), sg.summary());
     }
 
     for repair in &repairs {
@@ -171,8 +215,8 @@ async fn run(args: Cli) -> Result<ExitCode> {
 
     // A dead source is an endpoint failure, not a clean run that happened to learn nothing.
     // The report is still printed — it says which network and why — but the exit code has to
-    // reflect that no check was actually evaluated, or cron reads silence as health.
-    if !report.source.is_up() {
+    // reflect that some checks were not evaluated, or cron reads silence as health.
+    if report.blind_networks().next().is_some() {
         return Ok(ExitCode::from(EXIT_SOURCE));
     }
 
@@ -197,25 +241,25 @@ fn filter_accounts(mut resolved: Resolved, filter: &Filter) -> Result<Resolved> 
 
     let mut unmatched = Vec::new();
     for want in &filter.accounts {
-        if !resolved.accounts.iter().any(|a| matches_account(a, want)) {
+        if !resolved.accounts().any(|(_, a)| matches_account(a, want)) {
             unmatched.push(format!("account {want:?}"));
         }
     }
     for want in &filter.groups {
-        if !resolved.accounts.iter().any(|a| in_group(a, want)) {
+        if !resolved.accounts().any(|(_, a)| in_group(a, want)) {
             unmatched.push(format!("group {want:?}"));
         }
     }
 
     if !unmatched.is_empty() {
         let available: Vec<String> = resolved
-            .accounts
-            .iter()
-            .map(|a| {
+            .accounts()
+            .map(|(n, a)| {
                 format!(
-                    "{} ({}){}",
+                    "{} ({}) on {}{}",
                     a.label,
                     a.address,
+                    n.name,
                     a.group
                         .as_deref()
                         .map(|g| format!(" [{g}]"))
@@ -224,9 +268,8 @@ fn filter_accounts(mut resolved: Resolved, filter: &Filter) -> Result<Resolved> 
             })
             .collect();
         bail!(
-            "nothing matches {} on network {:?}\nconfigured accounts:\n  {}",
+            "nothing matches {}\nconfigured accounts:\n  {}",
             unmatched.join(", "),
-            resolved.network,
             if available.is_empty() {
                 "(none)".to_string()
             } else {
@@ -235,11 +278,27 @@ fn filter_accounts(mut resolved: Resolved, filter: &Filter) -> Result<Resolved> 
         );
     }
 
-    resolved.accounts.retain(|a| {
-        filter.accounts.iter().any(|w| matches_account(a, w))
-            || filter.groups.iter().any(|w| in_group(a, w))
-    });
+    for net in &mut resolved.networks {
+        net.accounts.retain(|a| {
+            filter.accounts.iter().any(|w| matches_account(a, w))
+                || filter.groups.iter().any(|w| in_group(a, w))
+        });
+    }
+    drop_emptied_networks(&mut resolved);
     Ok(resolved)
+}
+
+/// After a filter, drop networks it left with no accounts. A network that never had any runs
+/// for its subgraphs, and stays.
+fn drop_emptied_networks(resolved: &mut Resolved) {
+    let has_subgraphs = |name: &str| resolved.subgraphs.iter().any(|s| s.network == name);
+    let keep: Vec<bool> = resolved
+        .networks
+        .iter()
+        .map(|n| !n.accounts.is_empty() || has_subgraphs(&n.name))
+        .collect();
+    let mut keep = keep.into_iter();
+    resolved.networks.retain(|_| keep.next().unwrap_or(true));
 }
 
 fn matches_account(account: &graph_monitor_core::config::ResolvedAccount, want: &str) -> bool {
@@ -266,25 +325,29 @@ fn filter_spenders(mut resolved: Resolved, wanted: &[String]) -> Result<Resolved
                 .unwrap_or(false)
     };
 
-    for account in &mut resolved.accounts {
-        account
-            .allowances
-            .retain(|s| wanted.iter().any(|w| matches(s, w)));
+    for net in &mut resolved.networks {
+        for account in &mut net.accounts {
+            account
+                .allowances
+                .retain(|s| wanted.iter().any(|w| matches(s, w)));
+        }
     }
 
-    if resolved.accounts.iter().all(|a| a.allowances.is_empty()) {
+    if resolved.accounts().all(|(_, a)| a.allowances.is_empty()) {
         bail!(
-            "no configured allowance matches {} on network {:?}",
+            "no configured allowance matches {}",
             wanted
                 .iter()
                 .map(|w| format!("{w:?}"))
                 .collect::<Vec<_>>()
-                .join(", "),
-            resolved.network
+                .join(", ")
         );
     }
 
-    resolved.accounts.retain(|a| !a.allowances.is_empty());
+    for net in &mut resolved.networks {
+        net.accounts.retain(|a| !a.allowances.is_empty());
+    }
+    drop_emptied_networks(&mut resolved);
     Ok(resolved)
 }
 
@@ -321,8 +384,18 @@ fn filter_kinds(mut report: CycleReport, kinds: &[String]) -> Result<CycleReport
     Ok(report)
 }
 
-/// Config the executor needs, lifted before `Engine` takes ownership of the resolved config.
-struct EngineConfig {
+/// One network's readings, for that network's executor.
+fn readings_on(report: &CycleReport, network: &str) -> Vec<graph_monitor_core::watch::Reading> {
+    report
+        .readings
+        .iter()
+        .filter(|r| r.labels.network == network)
+        .cloned()
+        .collect()
+}
+
+/// What one network's executor needs, lifted before `Engine` takes ownership of the config.
+struct RepairConfig {
     network: String,
     rpc_url: String,
     signer_key: Option<String>,
@@ -330,59 +403,77 @@ struct EngineConfig {
     armed: Vec<(String, String)>,
 }
 
-fn engine_config(resolved: &Resolved) -> EngineConfig {
-    EngineConfig {
-        network: resolved.network.clone(),
-        rpc_url: resolved.rpc_url.clone(),
-        signer_key: resolved.signer_key.clone(),
-        token: resolved.address_of("GraphToken"),
-        armed: resolved
-            .accounts
-            .iter()
-            .flat_map(|a| {
-                [
-                    a.eth_remediate
-                        .as_ref()
-                        .map(|_| (a.label.clone(), "eth".to_string())),
-                    a.grt_remediate
-                        .as_ref()
-                        .map(|_| (a.label.clone(), "grt".to_string())),
-                ]
-            })
-            .flatten()
-            .collect(),
-    }
+fn repair_configs(resolved: &Resolved) -> Vec<RepairConfig> {
+    resolved
+        .networks
+        .iter()
+        .map(|n| RepairConfig {
+            network: n.name.clone(),
+            rpc_url: n.rpc.url.clone(),
+            signer_key: n.signer_key.clone(),
+            token: n.address_of("GraphToken"),
+            armed: n
+                .accounts
+                .iter()
+                .flat_map(|a| {
+                    [
+                        a.eth_remediate
+                            .as_ref()
+                            .map(|_| (a.label.clone(), "eth".to_string())),
+                        a.grt_remediate
+                            .as_ref()
+                            .map(|_| (a.label.clone(), "grt".to_string())),
+                    ]
+                })
+                .flatten()
+                .collect(),
+        })
+        .collect()
 }
 
-/// Build the executor, or explain why there isn't one.
+/// One executor per network that has repairs configured, or an explanation of why not.
 ///
-/// Two independent gates: the flag and a configured key. Neither alone arms it — a key sitting
-/// in config does nothing until someone passes `--remediate`, and the flag alone fails loudly
-/// rather than quietly doing nothing.
-fn build_executor(config: &EngineConfig, args: &RemediationArgs) -> Result<Option<Executor>> {
+/// Two independent gates: the flag and a configured key. Neither alone arms anything — a key
+/// sitting in config does nothing until someone passes `--remediate`, and the flag fails
+/// loudly rather than quietly doing nothing.
+fn build_executors(
+    configs: &[RepairConfig],
+    args: &RemediationArgs,
+) -> Result<Vec<(String, Executor)>> {
     if !args.remediate {
-        return Ok(None);
+        return Ok(Vec::new());
     }
-    let Some(key) = &config.signer_key else {
+    let mut executors = Vec::new();
+    for config in configs.iter().filter(|c| !c.armed.is_empty()) {
+        let Some(key) = &config.signer_key else {
+            bail!(
+                "--remediate was passed and network {:?} has repairs configured, but no \
+                 signer_key.\nAdd it to your own config (never the shipped defaults):\n\n  \
+                 [remediation.{}]\n  signer_key = \"${{GRAPH_MONITOR_SIGNER_KEY}}\"",
+                config.network,
+                config.network
+            );
+        };
+        let token = config.token.unwrap_or(alloy::primitives::Address::ZERO);
+        let executor = Executor::new(&config.rpc_url, key, token, args.dry_run)?;
+        if args.dry_run {
+            tracing::warn!(network = %config.network, signer = %executor.signer_address(), "remediation armed in dry-run mode");
+        } else {
+            tracing::warn!(
+                network = %config.network,
+                signer = %executor.signer_address(),
+                "remediation ARMED - transactions will be sent"
+            );
+        }
+        executors.push((config.network.clone(), executor));
+    }
+    if executors.is_empty() {
         bail!(
-            "--remediate was passed but network {:?} has no signer_key configured.\n\
-             Add it to your own config (never the shipped defaults):\n\n  \
-             [networks.{}]\n  signer_key = \"${{GRAPH_MONITOR_SIGNER_KEY}}\"",
-            config.network,
-            config.network
-        );
-    };
-    let token = config.token.unwrap_or(alloy::primitives::Address::ZERO);
-    let executor = Executor::new(&config.rpc_url, key, token, args.dry_run)?;
-    if args.dry_run {
-        tracing::warn!(signer = %executor.signer_address(), "remediation armed in dry-run mode");
-    } else {
-        tracing::warn!(
-            signer = %executor.signer_address(),
-            "remediation ARMED - transactions will be sent"
+            "--remediate was passed but no account has a remediate block, so there is nothing \
+             to repair. See the Remediation section of the README."
         );
     }
-    Ok(Some(executor))
+    Ok(executors)
 }
 
 /// Run cycles on an interval, exporting metrics.
@@ -394,12 +485,14 @@ async fn serve(
 ) -> Result<ExitCode> {
     use tokio::time::{interval, Duration, MissedTickBehavior};
 
-    let config = engine_config(&resolved);
-    let executor = build_executor(&config, &remediation)?;
+    let configs = repair_configs(&resolved);
+    let executors = build_executors(&configs, &remediation)?;
     let engine = Engine::new(resolved)?;
 
     let m = metrics::metrics();
-    m.prime(&config.network, &config.armed);
+    for config in &configs {
+        m.prime(&config.network, &config.armed);
+    }
 
     tokio::spawn(async move {
         if let Err(e) = metrics::serve(metrics_port).await {
@@ -415,6 +508,7 @@ async fn serve(
     tracing::info!(
         interval_secs,
         metrics_port,
+        networks = engine.network_count(),
         checks = engine.watch_count(),
         subgraphs = engine.subgraph_count(),
         "serving"
@@ -434,26 +528,32 @@ async fn serve(
             .await;
         m.publish(&report);
 
-        if let Some(exec) = &executor {
-            let repairs = exec.run(&report.readings).await;
-            m.publish_remediations(&config.network, &repairs);
+        for (network, exec) in &executors {
+            let repairs = exec.run(&readings_on(&report, network)).await;
+            m.publish_remediations(network, &repairs);
         }
 
         let (read, unreadable) = report.counts();
-        if report.source.is_up() {
+        for net in report.blind_networks() {
+            tracing::warn!(source = %net.source.id, reason = %net.source.summary(), "network read nothing");
+        }
+        if report.read_anything() {
             // Only a cycle that actually read something counts as success. Otherwise the
             // deadman is satisfied by a process failing briskly every two minutes.
             m.cycle_last_success.set(now_unix());
-            tracing::info!(
-                block = report.block.map(|b| b.number).unwrap_or_default(),
-                read,
-                unreadable,
-                "cycle complete"
-            );
+            tracing::info!(read, unreadable, "cycle complete");
         } else {
-            tracing::warn!(source = %report.source.summary(), "cycle read nothing");
+            tracing::warn!("cycle read nothing");
         }
     }
+}
+
+/// The host of a URL, without the path or query where API keys tend to live.
+fn url_host(url: &str) -> String {
+    url.parse::<alloy::transports::http::reqwest::Url>()
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "<unparseable>".to_string())
 }
 
 fn now_unix() -> f64 {
@@ -471,19 +571,29 @@ fn print_config(resolved: &Resolved, cmd: &ConfigCommand, json: bool) -> Result<
     match cmd {
         ConfigCommand::Addresses => {
             if json {
-                let map: serde_json::Map<String, serde_json::Value> = resolved
-                    .addresses
+                let by_network: serde_json::Map<String, serde_json::Value> = resolved
+                    .networks
                     .iter()
-                    .map(|(k, v)| (k.clone(), serde_json::json!(v.to_string())))
+                    .map(|n| {
+                        let book: serde_json::Map<String, serde_json::Value> = n
+                            .addresses
+                            .iter()
+                            .map(|(k, v)| (k.clone(), serde_json::json!(v.to_string())))
+                            .collect();
+                        (n.name.clone(), serde_json::Value::Object(book))
+                    })
                     .collect();
-                println!("{}", serde_json::to_string_pretty(&map)?);
+                println!("{}", serde_json::to_string_pretty(&by_network)?);
             } else {
                 let mut table = table::Table::new(&[
+                    ("Chain", table::Align::Left),
                     ("Name", table::Align::Left),
                     ("Address", table::Align::Left),
                 ]);
-                for (name, address) in &resolved.addresses {
-                    table.push(vec![name.clone(), address.to_string()]);
+                for n in &resolved.networks {
+                    for (name, address) in &n.addresses {
+                        table.push(vec![n.name.clone(), name.clone(), address.to_string()]);
+                    }
                 }
                 print!("{}", table.render());
             }
@@ -493,16 +603,36 @@ fn print_config(resolved: &Resolved, cmd: &ConfigCommand, json: bool) -> Result<
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({
-                        "network": resolved.network,
-                        "chain_id": resolved.chain_id,
-                        "rpc_url": resolved.rpc_url,
-                        "max_lag_seconds": resolved.max_lag.as_secs(),
-                        // Never the value. See `Resolved`'s Debug impl.
-                        "signer_key": resolved.signer_key.as_ref().map(|_| "<redacted>"),
                         "layers": resolved.sources,
                         "used_defaults": resolved.used_defaults,
-                        "addresses": resolved.addresses.len(),
-                        "accounts": resolved.accounts.iter().map(|a| serde_json::json!({
+                        // URLs are left out: RPC providers commonly put the API key in the path.
+                        "sources": {
+                            "rpc": resolved.networks.iter().map(|n| serde_json::json!({
+                                "network": n.name,
+                                "chain_id": n.chain_id,
+                                "host": url_host(&n.rpc.url),
+                                "max_lag_seconds": n.rpc.max_lag.as_secs(),
+                                "max_concurrency": n.rpc.max_concurrency,
+                                "max_log_range": n.rpc.max_log_range,
+                            })).collect::<Vec<_>>(),
+                            "subgraph": resolved.subgraph_sources.iter().map(|s| serde_json::json!({
+                                "name": s.name,
+                                "network": s.network,
+                                "url": s.endpoint.as_ref().ok().map(|e| e.url.clone()),
+                                "unusable": s.endpoint.as_ref().err(),
+                                "deployment": s.deployment,
+                                "max_lag_seconds": s.max_lag.as_secs(),
+                            })).collect::<Vec<_>>(),
+                        },
+                        "networks": resolved.networks.iter().map(|n| serde_json::json!({
+                            "network": n.name,
+                            "chain_id": n.chain_id,
+                            // Never the value. See `ResolvedNetwork`'s Debug impl.
+                            "signer_key": n.signer_key.as_ref().map(|_| "<redacted>"),
+                            "addresses": n.addresses.len(),
+                        })).collect::<Vec<_>>(),
+                        "accounts": resolved.accounts().map(|(n, a)| serde_json::json!({
+                            "network": n.name,
                             "label": a.label,
                             "address": a.address.to_string(),
                             "group": a.group,
@@ -514,39 +644,78 @@ fn print_config(resolved: &Resolved, cmd: &ConfigCommand, json: bool) -> Result<
                             "remediates": a.eth_remediate.is_some() || a.grt_remediate.is_some(),
                         })).collect::<Vec<_>>(),
                         "subgraphs": resolved.subgraphs.iter().map(|s| serde_json::json!({
-                            "label": s.label,
+                            "network": s.network,
                             "subgraph": s.subgraph,
                             "url": s.endpoint.as_ref().ok().map(|e| e.url.clone()),
                             "unusable": s.endpoint.as_ref().err(),
-                            "deployment": s.expected_deployment,
+                            "deployment": s.deployment,
                             "max_lag_seconds": s.max_lag.as_secs(),
                             "source": s.source.as_str(),
                         })).collect::<Vec<_>>(),
                     }))?
                 );
             } else {
-                println!("Network:   {} ({})", resolved.network, resolved.chain_id);
-                println!("RPC:       {}", resolved.rpc_url);
-                println!("Max lag:   {}s", resolved.max_lag.as_secs());
-                println!(
-                    "Signer:    {}",
-                    match resolved.signer_key {
-                        Some(_) => "<redacted>",
-                        None => "(none)",
-                    }
-                );
                 println!("Layers:    {}", resolved.sources.join(", "));
-                println!("Addresses: {}", resolved.addresses.len());
                 println!();
+
+                // Host only: RPC providers commonly put the API key in the path.
+                let mut table = table::Table::new(&[
+                    ("RPC source", table::Align::Left),
+                    ("Chain id", table::Align::Right),
+                    ("Host", table::Align::Left),
+                    ("Max lag", table::Align::Right),
+                    ("Signer", table::Align::Left),
+                    ("Addresses", table::Align::Right),
+                ]);
+                for n in &resolved.networks {
+                    table.push(vec![
+                        format!("rpc:{}", n.name),
+                        n.chain_id.to_string(),
+                        url_host(&n.rpc.url),
+                        format!("{}s", n.rpc.max_lag.as_secs()),
+                        match n.signer_key {
+                            Some(_) => "<redacted>",
+                            None => "",
+                        }
+                        .to_string(),
+                        n.addresses.len().to_string(),
+                    ]);
+                }
+                print!("{}", table.render());
+                println!();
+
+                if !resolved.subgraph_sources.is_empty() {
+                    let mut table = table::Table::new(&[
+                        ("Subgraph source", table::Align::Left),
+                        ("Chain", table::Align::Left),
+                        ("Endpoint", table::Align::Left),
+                        ("Max lag", table::Align::Right),
+                    ]);
+                    for s in &resolved.subgraph_sources {
+                        table.push(vec![
+                            format!("subgraph:{}", s.name),
+                            s.network.clone(),
+                            match &s.endpoint {
+                                // The key travels in a header, so the URL is safe to print.
+                                Ok(e) => e.url.clone(),
+                                Err(reason) => format!("unusable: {reason}"),
+                            },
+                            format!("{}s", s.max_lag.as_secs()),
+                        ]);
+                    }
+                    print!("{}", table.render());
+                    println!();
+                }
 
                 let mut table = table::Table::new(&[
                     ("Account", table::Align::Left),
+                    ("Chain", table::Align::Left),
                     ("Group", table::Align::Left),
                     ("Watches", table::Align::Left),
                     ("Remediates", table::Align::Left),
                     ("From", table::Align::Left),
                 ]);
-                for a in &resolved.accounts {
+                for (n, a) in resolved.accounts() {
                     let mut watches = Vec::new();
                     if a.watch_eth {
                         watches.push("eth".to_string());
@@ -569,6 +738,7 @@ fn print_config(resolved: &Resolved, cmd: &ConfigCommand, json: bool) -> Result<
                     }
                     table.push(vec![
                         a.label.clone(),
+                        n.name.clone(),
                         a.group.clone().unwrap_or_default(),
                         watches.join(", "),
                         repairs.join(", "),
@@ -581,13 +751,15 @@ fn print_config(resolved: &Resolved, cmd: &ConfigCommand, json: bool) -> Result<
                     println!();
                     let mut table = table::Table::new(&[
                         ("Subgraph", table::Align::Left),
+                        ("Chain", table::Align::Left),
                         ("Endpoint", table::Align::Left),
                         ("Max lag", table::Align::Right),
                         ("From", table::Align::Left),
                     ]);
                     for s in &resolved.subgraphs {
                         table.push(vec![
-                            s.label.clone(),
+                            s.name(),
+                            s.network.clone(),
                             match &s.endpoint {
                                 // The key travels in a header, so the URL is safe to print.
                                 Ok(e) => e.url.clone(),

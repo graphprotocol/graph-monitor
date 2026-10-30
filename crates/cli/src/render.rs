@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use alloy::primitives::Address;
 use graph_monitor_core::engine::CycleReport;
-use graph_monitor_core::source::SourceHealth;
+use graph_monitor_core::subgraph::{SubgraphHealth, SubgraphStatus};
 use graph_monitor_core::watch::{Measurement, Reading};
 use graph_monitor_core::watches::{
     humanize, M_ALLOWANCE, M_ALLOWANCE_UNLIMITED, M_ETH_BALANCE, M_GRT_BALANCE, M_IDLE_SECONDS,
@@ -28,31 +28,36 @@ const UNREADABLE: &str = "!";
 /// Blank means "not configured" — no check asked about it.
 const UNCONFIGURED: &str = "–";
 
-/// The block-provenance header. Every human readout opens with this, so a pasted screenshot
-/// says which network and height it came from.
+/// The block-provenance header, one line per network. Every human readout opens with this,
+/// so a pasted screenshot says which networks and heights it came from.
 pub fn header(report: &CycleReport) -> String {
-    match report.block {
-        Some(block) => format!(
-            "{}  {}",
-            style::bold(&report.network),
-            style::dim(&format!(
-                "chain {} · block {} · {}",
-                report.chain_id,
-                group_thousands(block.number),
-                block.timestamp_utc()
-            ))
-        ),
-        // Even with nothing read, the readout still says where it was looking.
-        None => format!(
-            "{}  {}",
-            style::bold(&report.network),
-            style::alarm(&format!(
-                "chain {} · no block read · source {}",
-                report.chain_id,
-                report.source.summary()
-            ))
-        ),
-    }
+    let lines: Vec<String> = report
+        .networks
+        .iter()
+        .map(|net| match net.block {
+            Some(block) => format!(
+                "{}  {}",
+                style::bold(&net.network),
+                style::dim(&format!(
+                    "chain {} · block {} · {}",
+                    net.chain_id,
+                    group_thousands(block.number),
+                    block.timestamp_utc()
+                ))
+            ),
+            // Even with nothing read, the readout still says where it was looking.
+            None => format!(
+                "{}  {}",
+                style::bold(&net.network),
+                style::alarm(&format!(
+                    "chain {} · no block read · source {}",
+                    net.chain_id,
+                    net.source.summary()
+                ))
+            ),
+        })
+        .collect();
+    lines.join("\n")
 }
 
 /// Full address, dimmed.
@@ -139,14 +144,19 @@ fn group_thousands_str(digits: &str) -> String {
     out
 }
 
-fn account_rows(report: &CycleReport) -> BTreeMap<String, AccountRow> {
-    let mut rows: BTreeMap<String, AccountRow> = BTreeMap::new();
+/// (label, network): the same label on two chains is two accounts.
+type AccountKey = (String, String);
+
+fn account_rows(report: &CycleReport) -> BTreeMap<AccountKey, AccountRow> {
+    let mut rows: BTreeMap<AccountKey, AccountRow> = BTreeMap::new();
 
     for reading in &report.readings {
         let Some(account) = reading.labels.account.clone() else {
             continue;
         };
-        let row = rows.entry(account).or_default();
+        let row = rows
+            .entry((account, reading.labels.network.clone()))
+            .or_default();
         row.group = reading.labels.group.clone().or(row.group.take());
         row.address = reading.labels.address.or(row.address);
         if let Some(intent) = &reading.remediation {
@@ -189,9 +199,10 @@ fn remediation_note(notes: &[String]) -> String {
     style::action(&notes.join("; "))
 }
 
-fn balance_row(label: &str, row: &AccountRow) -> Vec<String> {
+fn balance_row((label, network): &AccountKey, row: &AccountRow) -> Vec<String> {
     vec![
         format!("  {label}"),
+        style::dim(network),
         row.address.map(|a| render_address(&a)).unwrap_or_default(),
         row.eth
             .as_ref()
@@ -214,11 +225,18 @@ pub fn grouped(report: &CycleReport) -> String {
     out.push_str(&header(report));
     out.push_str("\n\n");
 
+    // How the tool sees, before what it saw. Everything below is only as good as these.
+    out.push_str(&style::bold("Sources"));
+    out.push('\n');
+    out.push_str(&sources_table(report));
+    out.push('\n');
+
     let rows = account_rows(report);
 
     {
         let mut table = Table::new(&[
             ("Account", Align::Left),
+            ("Chain", Align::Left),
             ("Address", Align::Left),
             ("ETH", Align::Right),
             ("GRT", Align::Right),
@@ -227,7 +245,8 @@ pub fn grouped(report: &CycleReport) -> String {
         ]);
 
         // Grouped, with ungrouped last. Groups are a display device here and nothing more.
-        let mut by_group: BTreeMap<Option<String>, Vec<(&String, &AccountRow)>> = BTreeMap::new();
+        let mut by_group: BTreeMap<Option<String>, Vec<(&AccountKey, &AccountRow)>> =
+            BTreeMap::new();
         for (label, row) in &rows {
             by_group
                 .entry(row.group.clone())
@@ -268,6 +287,7 @@ pub fn grouped(report: &CycleReport) -> String {
 
         let mut table = Table::new(&[
             ("Owner", Align::Left),
+            ("Chain", Align::Left),
             ("Spender", Align::Left),
             ("Allowance", Align::Right),
             ("Unlimited", Align::Left),
@@ -286,7 +306,13 @@ pub fn grouped(report: &CycleReport) -> String {
                 Some(_) => "no",
                 None => UNREADABLE,
             };
-            table.push(vec![owner, format!("→ {spender}"), value, unlimited.into()]);
+            table.push(vec![
+                owner,
+                style::dim(&reading.labels.network),
+                format!("→ {spender}"),
+                value,
+                unlimited.into(),
+            ]);
         }
 
         if table.is_empty() {
@@ -296,6 +322,7 @@ pub fn grouped(report: &CycleReport) -> String {
         }
     }
 
+    // Subgraphs are part of the network being watched, so they sit with the other findings.
     if !report.subgraphs.is_empty() {
         out.push('\n');
         out.push_str(&style::bold("Subgraphs"));
@@ -307,11 +334,68 @@ pub fn grouped(report: &CycleReport) -> String {
     out
 }
 
-/// Nothing here is graded beyond what stage 0 already decided: up means reachable, the
-/// expected deployment, no indexing errors, and inside `max_lag`.
-fn subgraph_table(subgraphs: &[SourceHealth]) -> String {
+/// The tool's inputs: every network's RPC, then every subgraph it reads from. If one is
+/// down, the tool is blind to what it serves.
+fn sources_table(report: &CycleReport) -> String {
+    let mut table = Table::new(&[
+        ("Source", Align::Left),
+        ("Chain", Align::Left),
+        ("Up", Align::Left),
+        ("Block", Align::Right),
+        ("Lag", Align::Right),
+        ("Detail", Align::Left),
+    ]);
+    let rpcs = report
+        .networks
+        .iter()
+        .map(|n| (&n.source, Some(n.chain_id)));
+    let subgraphs = report.subgraph_sources.iter().map(|s| (s, None));
+    for (source, chain_id) in rpcs.chain(subgraphs) {
+        // `!` only when nothing could be read at all.
+        let unknown = || {
+            if source.head.is_none() {
+                style::alarm(UNREADABLE)
+            } else {
+                style::dim(UNCONFIGURED)
+            }
+        };
+        let detail = match (&source.fault, chain_id) {
+            (Some(fault), _) => style::alarm(&fault.summary()),
+            (None, Some(id)) => style::dim(&format!("chain {id}")),
+            (None, None) => String::new(),
+        };
+        table.push(vec![
+            source.id.to_string(),
+            style::dim(&source.network),
+            yes_no(source.is_up()),
+            source
+                .head
+                .map(|h| group_thousands(h.number))
+                .unwrap_or_else(unknown),
+            source
+                .lag
+                .map(|l| humanize(l.as_secs()))
+                .unwrap_or_else(unknown),
+            detail,
+        ]);
+    }
+    table.render()
+}
+
+fn yes_no(up: bool) -> String {
+    if up {
+        "yes".to_string()
+    } else {
+        style::alarm("no")
+    }
+}
+
+/// Nothing is graded here beyond the check itself: up means answering, the asked-for
+/// deployment, no indexing errors, and inside `max_lag`.
+fn subgraph_table(subgraphs: &[SubgraphHealth]) -> String {
     let mut table = Table::new(&[
         ("Subgraph", Align::Left),
+        ("Chain", Align::Left),
         ("Up", Align::Left),
         ("Indexed block", Align::Right),
         ("Behind", Align::Right),
@@ -319,43 +403,54 @@ fn subgraph_table(subgraphs: &[SourceHealth]) -> String {
         ("Detail", Align::Left),
     ]);
     for sg in subgraphs {
-        let label = sg
-            .id
-            .as_str()
-            .strip_prefix("subgraph:")
-            .unwrap_or(sg.id.as_str());
-        // A deployment sits under the subgraph it was listed with.
-        let label = match label.split_once('@') {
-            Some((_, deployment)) => format!("  └ {deployment}"),
-            None => label.to_string(),
+        // A listed deployment sits under the subgraph it was listed with.
+        let label = match &sg.deployment {
+            Some(d) => format!("  └ {d}"),
+            None => sg.subgraph.clone(),
         };
-        // Unknown renders as `!` only when the subgraph could not be read at all. A gap
-        // that could not be measured (RPC down, no timestamp) is blank, not a failure.
-        let unknown = if sg.indexed_block.is_none() {
-            style::alarm(UNREADABLE)
+        // `!` only when nothing could be read. A gap that could not be measured on a
+        // subgraph that did answer (RPC down, another chain, no timestamp) is blank, not a
+        // failure.
+        let unknown = || {
+            if sg.indexed_block.is_none() {
+                style::alarm(UNREADABLE)
+            } else {
+                style::dim(UNCONFIGURED)
+            }
+        };
+        let up = match &sg.status {
+            SubgraphStatus::Up => "yes".to_string(),
+            SubgraphStatus::Down(_) => style::alarm("no"),
+            // Our problem, not the subgraph's: it must not read as "no".
+            SubgraphStatus::NotChecked(_) => style::action("not checked"),
+        };
+        let detail = match &sg.status {
+            SubgraphStatus::Up if sg.deployment.is_some() => String::new(),
+            // For the published version, which deployment that currently is.
+            SubgraphStatus::Up => style::dim(sg.served_deployment.as_deref().unwrap_or_default()),
+            SubgraphStatus::Down(fault) => style::alarm(&fault.summary()),
+            SubgraphStatus::NotChecked(reason) => style::action(reason),
+        };
+        // A deployment row is on its parent's chain; saying it again is noise.
+        let chain = if sg.deployment.is_some() {
+            String::new()
         } else {
-            style::dim(UNCONFIGURED)
+            style::dim(&sg.network)
         };
         table.push(vec![
             label,
-            if sg.is_up() {
-                "yes".to_string()
-            } else {
-                style::alarm("no")
-            },
+            chain,
+            up,
             sg.indexed_block
                 .map(group_thousands)
-                .unwrap_or_else(|| unknown.clone()),
+                .unwrap_or_else(unknown),
             sg.blocks_behind
                 .map(|b| format!("{} blocks", group_thousands(b)))
-                .unwrap_or_else(|| unknown.clone()),
+                .unwrap_or_else(unknown),
             sg.lag
                 .map(|l| humanize(l.as_secs()))
-                .unwrap_or_else(|| unknown.clone()),
-            match &sg.fault {
-                Some(fault) => style::alarm(&fault.summary()),
-                None => style::dim(sg.deployment.as_deref().unwrap_or_default()),
-            },
+                .unwrap_or_else(unknown),
+            detail,
         ]);
     }
     table.render()
@@ -379,6 +474,7 @@ pub fn flat(report: &CycleReport, unreadable_only: bool) -> String {
 
     let mut table = Table::new(&[
         ("Read", Align::Left),
+        ("Chain", Align::Left),
         ("Watch", Align::Left),
         ("Detail", Align::Left),
     ]);
@@ -397,21 +493,44 @@ pub fn flat(report: &CycleReport, unreadable_only: bool) -> String {
         }
         table.push(vec![
             if reading.is_unreadable() { "!" } else { "ok" }.to_string(),
+            reading.labels.network.clone(),
             reading.id.to_string(),
             detail,
         ]);
     }
 
-    // Subgraphs are sources rather than watches, but in a flat list of "what did and did
-    // not resolve" they belong beside everything else.
+    // The RPC and subgraphs are not watches, but in a flat list of "what did and did not
+    // resolve" they belong beside everything else.
+    for rpc in report
+        .networks
+        .iter()
+        .map(|n| &n.source)
+        .chain(&report.subgraph_sources)
+    {
+        if unreadable_only && rpc.is_up() {
+            continue;
+        }
+        table.push(vec![
+            if rpc.is_up() { "ok" } else { "!" }.to_string(),
+            rpc.network.clone(),
+            rpc.id.to_string(),
+            rpc.summary(),
+        ]);
+    }
     for sg in &report.subgraphs {
         if unreadable_only && sg.is_up() {
             continue;
         }
         table.push(vec![
-            if sg.is_up() { "ok" } else { "!" }.to_string(),
-            sg.id.to_string(),
-            subgraph_summary(sg),
+            match sg.status {
+                SubgraphStatus::Up => "ok",
+                SubgraphStatus::Down(_) => "!",
+                SubgraphStatus::NotChecked(_) => "?",
+            }
+            .to_string(),
+            sg.network.clone(),
+            format!("subgraph:{}", sg.name()),
+            sg.summary(),
         ]);
     }
 
@@ -434,9 +553,17 @@ pub fn flat(report: &CycleReport, unreadable_only: bool) -> String {
 /// A count alone sends the reader off to rerun with `--flat`. Watches failing for the same
 /// reason share a line, so a provider limit hitting five accounts reads as one problem.
 pub fn unreadable_notes(report: &CycleReport) -> Vec<String> {
-    let mut by_reason: Vec<((&str, &str), Vec<&str>)> = Vec::new();
-    for reading in report.unreadable() {
-        let key = (reading.id.kind, reading.summary());
+    // (network, kind, reason) -> the watches that failed that way.
+    type Reason<'a> = (&'a str, &'a str, &'a str);
+    let mut by_reason: Vec<(Reason, Vec<&str>)> = Vec::new();
+    // Watches on a dead source share one reason, which the source note already gives.
+    let source_up = |network: &str| report.network(network).is_some_and(|n| n.source.is_up());
+    for reading in report.unreadable().filter(|r| source_up(&r.labels.network)) {
+        let key = (
+            reading.labels.network.as_str(),
+            reading.id.kind,
+            reading.summary(),
+        );
         let instance = reading.id.instance.as_str();
         match by_reason.iter_mut().find(|(k, _)| *k == key) {
             Some((_, instances)) => instances.push(instance),
@@ -445,19 +572,10 @@ pub fn unreadable_notes(report: &CycleReport) -> Vec<String> {
     }
     by_reason
         .into_iter()
-        .map(|((kind, reason), instances)| format!("{kind} {}: {reason}", instances.join(", ")))
+        .map(|((network, kind, reason), instances)| {
+            format!("{network} {kind} {}: {reason}", instances.join(", "))
+        })
         .collect()
-}
-
-fn subgraph_summary(sg: &SourceHealth) -> String {
-    match (&sg.fault, sg.indexed_block, sg.blocks_behind) {
-        (Some(fault), _, _) => fault.summary(),
-        (None, Some(block), Some(behind)) => {
-            format!("indexed to block {block}, {behind} blocks behind the chain head")
-        }
-        (None, Some(block), None) => format!("indexed to block {block}"),
-        (None, None, _) => "reachable".to_string(),
-    }
 }
 
 pub fn summary_line(report: &CycleReport) -> String {
@@ -469,6 +587,12 @@ pub fn summary_line(report: &CycleReport) -> String {
     let down = report.subgraphs_down().count();
     if down > 0 {
         parts.push(style::alarm(&format!("{down} subgraph(s) down")));
+    }
+    let not_checked = report.subgraphs_not_checked().count();
+    if not_checked > 0 {
+        parts.push(style::action(&format!(
+            "{not_checked} subgraph(s) not checked"
+        )));
     }
     let pending = report.remediations().count();
     if pending > 0 {
@@ -491,6 +615,7 @@ pub fn json(report: &CycleReport) -> Value {
         .iter()
         .map(|o| {
             json!({
+                "network": o.labels.network,
                 "check": o.id.kind,
                 "instance": o.id.instance,
                 "read": if o.is_unreadable() { "failed" } else { "ok" },
@@ -514,25 +639,41 @@ pub fn json(report: &CycleReport) -> Value {
 
     let (read, unreadable) = report.counts();
 
-    // Block provenance comes first, and is present in every mode.
+    // Block provenance comes first, and is present in every mode: one entry per network.
     json!({
-        "network": report.network,
-        "chain_id": report.chain_id,
-        "block": report.block.map(|b| b.number),
-        "block_timestamp": report.block.map(|b| b.timestamp_rfc3339()),
-        "source": {
-            "id": report.source.id.as_str(),
-            "up": report.source.is_up(),
-            "summary": report.source.summary(),
-            "lag_seconds": report.source.lag.map(|l| l.as_secs()),
-        },
+        "networks": report.networks.iter().map(|n| json!({
+            "network": n.network,
+            "chain_id": n.chain_id,
+            "block": n.block.map(|b| b.number),
+            "block_timestamp": n.block.map(|b| b.timestamp_rfc3339()),
+            "source": {
+                "id": n.source.id.as_str(),
+                "up": n.source.is_up(),
+                "summary": n.source.summary(),
+                "lag_seconds": n.source.lag.map(|l| l.as_secs()),
+            },
+        })).collect::<Vec<_>>(),
+        "subgraph_sources": report.subgraph_sources.iter().map(|s| json!({
+            "id": s.id.as_str(),
+            "network": s.network,
+            "up": s.is_up(),
+            "summary": s.summary(),
+            "block": s.head.map(|h| h.number),
+            "lag_seconds": s.lag.map(|l| l.as_secs()),
+        })).collect::<Vec<_>>(),
         "counts": { "read": read, "unreadable": unreadable },
         "watches": readings,
         "subgraphs": report.subgraphs.iter().map(|sg| json!({
-            "id": sg.id.as_str(),
-            "up": sg.is_up(),
-            "summary": subgraph_summary(sg),
+            "network": sg.network,
+            "subgraph": sg.subgraph,
             "deployment": sg.deployment,
+            "status": match sg.status {
+                SubgraphStatus::Up => "up",
+                SubgraphStatus::Down(_) => "down",
+                SubgraphStatus::NotChecked(_) => "not_checked",
+            },
+            "summary": sg.summary(),
+            "served_deployment": sg.served_deployment,
             "indexed_block": sg.indexed_block,
             "blocks_behind": sg.blocks_behind,
             "lag_seconds": sg.lag.map(|l| l.as_secs()),
@@ -544,8 +685,10 @@ pub fn json(report: &CycleReport) -> Value {
 mod tests {
     use super::*;
     use alloy::primitives::U256;
+    use graph_monitor_core::engine::NetworkReport;
     use graph_monitor_core::rpc::PinnedBlock;
-    use graph_monitor_core::source::{SourceFault, SourceId};
+    use graph_monitor_core::source::{SourceHealth, SourceId};
+    use graph_monitor_core::subgraph::SubgraphFault;
     use graph_monitor_core::units::Amount;
     use graph_monitor_core::watch::{Asset, Labels, Observation, RemediationIntent, Unit, WatchId};
     use std::time::Duration;
@@ -597,29 +740,41 @@ mod tests {
             timestamp: 1_773_253_334,
         };
         CycleReport {
-            network: "arbitrum-one".into(),
-            chain_id: 42161,
-            source: SourceHealth {
-                chain_id: Some(42161),
-                head: Some(head),
-                lag: Some(Duration::from_secs(2)),
-                ..SourceHealth::new(SourceId::rpc("arbitrum-one"), "arbitrum-one")
-            },
-            block: Some(head),
+            networks: vec![NetworkReport {
+                network: "arbitrum-one".into(),
+                chain_id: 42161,
+                source: SourceHealth {
+                    chain_id: Some(42161),
+                    head: Some(head),
+                    lag: Some(Duration::from_secs(2)),
+                    ..SourceHealth::new(SourceId::rpc("arbitrum-one"), "arbitrum-one")
+                },
+                block: Some(head),
+                watches: readings.len(),
+            }],
+            subgraph_sources: Vec::new(),
             readings,
             subgraphs: Vec::new(),
             duration: Duration::ZERO,
         }
     }
 
-    fn subgraph(label: &str, indexed: Option<u64>, fault: Option<SourceFault>) -> SourceHealth {
-        SourceHealth {
+    fn subgraph(
+        name: &str,
+        deployment: Option<&str>,
+        indexed: Option<u64>,
+        status: SubgraphStatus,
+    ) -> SubgraphHealth {
+        SubgraphHealth {
+            network: "arbitrum-one".into(),
+            subgraph: name.into(),
+            deployment: deployment.map(str::to_string),
+            served_deployment: indexed.map(|_| "QmServed".to_string()),
             indexed_block: indexed,
+            block_timestamp: None,
             blocks_behind: indexed.map(|b| 505_090_074 - b),
             lag: indexed.map(|_| Duration::from_secs(45)),
-            deployment: indexed.map(|_| "QmDeployment".to_string()),
-            fault,
-            ..SourceHealth::new(SourceId::subgraph(label), "arbitrum-one")
+            status,
         }
     }
 
@@ -627,30 +782,99 @@ mod tests {
     fn subgraphs_render_their_lag_and_failures() {
         let mut r = report(vec![]);
         r.subgraphs = vec![
-            subgraph("network", Some(505_089_974), None),
-            subgraph("network@QmNext", Some(505_000_000), None),
+            subgraph("network", None, Some(505_089_974), SubgraphStatus::Up),
+            subgraph(
+                "network",
+                Some("QmNext"),
+                Some(505_000_000),
+                SubgraphStatus::Up,
+            ),
             subgraph(
                 "ebo",
                 None,
-                Some(SourceFault::Unreachable("subgraph not found".into())),
+                None,
+                SubgraphStatus::Down(SubgraphFault::Unreachable("subgraph not found".into())),
             ),
+            subgraph(
+                "qos",
+                None,
+                None,
+                SubgraphStatus::NotChecked("no gateway.api_key configured".into()),
+            ),
+            // Another chain: answered, but the gap to our RPC's head is not measurable.
+            SubgraphHealth {
+                network: "gnosis".into(),
+                blocks_behind: None,
+                ..subgraph("gateway-qos", None, Some(42), SubgraphStatus::Up)
+            },
         ];
         let out = grouped(&r);
-        let row = |name: &str| out.lines().find(|l| l.contains(name)).unwrap().to_string();
+        let row = |name: &str| {
+            out.lines()
+                .find(|l| l.trim_start().starts_with(name))
+                .unwrap_or_else(|| panic!("no row {name} in:\n{out}"))
+                .to_string()
+        };
         assert!(row("network").contains("100 blocks"), "{out}");
         assert!(row("network").contains("45s"), "{out}");
-        assert!(row("ebo").contains("subgraph not found"), "{out}");
+        assert!(row("network").contains("QmServed"), "{out}");
         // A listed deployment renders under its subgraph, not as a sibling.
-        assert!(row("QmNext").contains("└ QmNext"), "{out}");
-        assert!(summary_line(&r).contains("1 subgraph(s) down"));
+        assert!(row("└ QmNext").contains("90,074 blocks"), "{out}");
+        assert!(row("ebo").contains("subgraph not found"), "{out}");
+        // Not checked is our problem and must not read as the subgraph being down.
+        let gnosis = row("gateway-qos");
+        assert!(gnosis.contains("gnosis"), "{out}");
+        assert!(!gnosis.contains('!'), "{out}");
+        let qos = row("qos");
+        let up_column: Vec<&str> = qos.split_whitespace().skip(2).take(2).collect();
+        assert_eq!(up_column, ["not", "checked"], "{out}");
+        let line = summary_line(&r);
+        assert!(line.contains("1 subgraph(s) down"), "{line}");
+        assert!(line.contains("1 subgraph(s) not checked"), "{line}");
 
         let flat_out = flat(&r, true);
         assert!(flat_out.contains("subgraph:ebo"), "{flat_out}");
+        assert!(flat_out.contains("subgraph:qos"), "{flat_out}");
         assert!(!flat_out.contains("subgraph:network"), "{flat_out}");
 
         let v = json(&r);
         assert_eq!(v["subgraphs"][0]["blocks_behind"], json!(100));
-        assert_eq!(v["subgraphs"][2]["up"], json!(false));
+        assert_eq!(v["subgraphs"][1]["deployment"], json!("QmNext"));
+        assert_eq!(v["subgraphs"][2]["status"], json!("down"));
+        assert_eq!(v["subgraphs"][3]["status"], json!("not_checked"));
+    }
+
+    #[test]
+    fn subgraph_sources_are_listed_with_the_rpcs() {
+        let mut r = report(vec![]);
+        r.subgraph_sources = vec![SourceHealth {
+            head: Some(PinnedBlock {
+                number: 505_090_000,
+                timestamp: 1_773_253_330,
+            }),
+            lag: Some(Duration::from_secs(4)),
+            ..SourceHealth::new(SourceId::subgraph("monitor"), "arbitrum-one")
+        }];
+        let out = grouped(&r);
+        let sources = &out[out.find("Sources").unwrap()..out.find("GRT allowances").unwrap()];
+        let row = sources
+            .lines()
+            .find(|l| l.contains("subgraph:monitor"))
+            .unwrap_or_else(|| panic!("no subgraph source row in:\n{out}"));
+        assert!(
+            row.contains("arbitrum-one") && row.contains("505,090,000"),
+            "{row}"
+        );
+        assert_eq!(json(&r)["subgraph_sources"][0]["up"], json!(true));
+    }
+
+    #[test]
+    fn subgraphs_come_after_the_findings_they_sit_with() {
+        let mut r = report(vec![]);
+        r.subgraphs = vec![subgraph("network", None, Some(1), SubgraphStatus::Up)];
+        let out = grouped(&r);
+        assert!(out.find("GRT allowances").unwrap() < out.find("Subgraphs").unwrap());
+        assert!(!grouped(&report(vec![])).contains("Subgraphs"));
     }
 
     #[test]
@@ -669,16 +893,24 @@ mod tests {
         assert_eq!(
             notes,
             [
-                "activity SamOracleGraphOps, SamOracleSemiotic: searched 600000 blocks without \
-                 reaching the lookback",
-                "eth_balance BillingWallet: endpoint refused historical state",
+                "arbitrum-one activity SamOracleGraphOps, SamOracleSemiotic: searched 600000 \
+                 blocks without reaching the lookback",
+                "arbitrum-one eth_balance BillingWallet: endpoint refused historical state",
             ]
         );
     }
 
     #[test]
-    fn no_subgraphs_means_no_subgraph_section() {
-        assert!(!grouped(&report(vec![])).contains("Subgraphs"));
+    fn sources_come_first() {
+        let out = grouped(&report(vec![]));
+        let row = out
+            .lines()
+            .find(|l| l.contains("rpc:arbitrum-one"))
+            .unwrap_or_else(|| panic!("no rpc row in:\n{out}"));
+        assert!(row.contains("505,090,074"), "{row}");
+        assert!(row.contains("2s"), "{row}");
+        // How the tool sees comes before what it saw.
+        assert!(out.find("Sources").unwrap() < out.find("GRT allowances").unwrap());
     }
 
     #[test]
@@ -692,7 +924,7 @@ mod tests {
     #[test]
     fn header_still_names_the_network_when_nothing_could_be_read() {
         let mut r = report(vec![]);
-        r.block = None;
+        r.networks[0].block = None;
         let out = grouped(&r);
         assert!(out.contains("arbitrum-one"), "{out}");
         assert!(out.contains("no block read"), "{out}");
@@ -901,13 +1133,62 @@ mod tests {
             .keys()
             .map(|k| k.as_str())
             .collect();
-        assert_eq!(keys[0], "network");
+        assert_eq!(keys[0], "networks");
         assert!(
-            keys.iter().position(|k| *k == "block").unwrap()
+            keys.iter().position(|k| *k == "networks").unwrap()
                 < keys.iter().position(|k| *k == "watches").unwrap()
         );
-        assert_eq!(value["block"], json!(505_090_074u64));
-        assert_eq!(value["source"]["up"], json!(true));
+        assert_eq!(value["networks"][0]["block"], json!(505_090_074u64));
+        assert_eq!(value["networks"][0]["source"]["up"], json!(true));
+    }
+
+    #[test]
+    fn every_network_gets_a_header_line_and_rows_name_their_chain() {
+        let mut gnosis = outcome(
+            "eth_balance",
+            "BillingWallet",
+            None,
+            Some((M_ETH_BALANCE, 1.5, Unit::Eth)),
+        );
+        gnosis.labels.network = "gnosis".into();
+        let mut r = report(vec![
+            outcome(
+                "eth_balance",
+                "BillingWallet",
+                None,
+                Some((M_ETH_BALANCE, 0.25, Unit::Eth)),
+            ),
+            gnosis,
+        ]);
+        r.networks.push(NetworkReport {
+            network: "gnosis".into(),
+            chain_id: 100,
+            source: SourceHealth::new(SourceId::rpc("gnosis"), "gnosis"),
+            block: Some(PinnedBlock {
+                number: 49_021_050,
+                timestamp: 1_773_253_330,
+            }),
+            watches: 1,
+        });
+        let out = grouped(&r);
+        assert!(out.contains("block 505,090,074"), "{out}");
+        assert!(out.contains("block 49,021,050"), "{out}");
+        // The same label on two chains is two rows, each saying which chain.
+        let rows: Vec<&str> = out
+            .lines()
+            .filter(|l| l.contains("BillingWallet"))
+            .collect();
+        assert_eq!(rows.len(), 2, "{out}");
+        assert!(rows
+            .iter()
+            .any(|l| l.contains("arbitrum-one") && l.contains("0.25")));
+        assert!(rows
+            .iter()
+            .any(|l| l.contains("gnosis") && l.contains("1.50")));
+
+        let v = json(&r);
+        assert_eq!(v["networks"][1]["network"], json!("gnosis"));
+        assert_eq!(v["watches"][1]["network"], json!("gnosis"));
     }
 
     #[test]

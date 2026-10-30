@@ -49,7 +49,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(gm_source_up{network=\"$network\", source=~\"rpc:.*\"})",
+          "expr": "min(gm_source_up{network=~\"$network\"})",
           "refId": "A",
           "range": false,
           "instant": true
@@ -100,7 +100,7 @@
         },
         "overrides": []
       },
-      "description": "Stage 0 verified the endpoint: reachable, right chain, head fresh."
+      "description": "Stage 0 verified every source the tool reads from: reachable, right chain, head fresh. If this is down, the tool is blind, not the network."
     },
     {
       "type": "stat",
@@ -188,7 +188,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(gm_read_unknown{network=\"$network\", group=~\"$group\", account=~\"$account\"})",
+          "expr": "sum(gm_read_unknown{network=~\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "A",
           "range": false,
           "instant": true
@@ -249,7 +249,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(gm_source_lag_seconds{network=\"$network\", source=~\"rpc:.*\"})",
+          "expr": "max(gm_source_lag_seconds{network=~\"$network\"})",
           "refId": "A",
           "range": false,
           "instant": true
@@ -314,10 +314,11 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max(gm_block_height{network=\"$network\"})",
+          "expr": "max by (network) (gm_block_height{network=~\"$network\"})",
           "refId": "A",
           "range": false,
-          "instant": true
+          "instant": true,
+          "legendFormat": "{{network}}"
         }
       ],
       "options": {
@@ -329,7 +330,7 @@
           "values": false
         },
         "orientation": "auto",
-        "textMode": "auto",
+        "textMode": "value_and_name",
         "colorMode": "value",
         "graphMode": "area",
         "justifyMode": "auto"
@@ -349,7 +350,7 @@
         },
         "overrides": []
       },
-      "description": "Every value on this dashboard was read at this height."
+      "description": "Every value on this dashboard was read at these heights, one per network."
     },
     {
       "type": "stat",
@@ -441,7 +442,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (group, account, address) (gm_account_eth_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"})",
+          "expr": "max by (group, account, address) (gm_account_eth_balance{network=~\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -453,7 +454,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (group, account, address) (gm_account_grt_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"})",
+          "expr": "max by (group, account, address) (gm_account_grt_balance{network=~\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "B",
           "range": false,
           "instant": true,
@@ -465,7 +466,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (group, account, address) (gm_account_idle_seconds{network=\"$network\", group=~\"$group\", account=~\"$account\"})",
+          "expr": "max by (group, account, address) (gm_account_idle_seconds{network=~\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "C",
           "range": false,
           "instant": true,
@@ -477,7 +478,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (group, account, address) (gm_account_activity_seen{network=\"$network\", group=~\"$group\", account=~\"$account\"})",
+          "expr": "max by (group, account, address) (gm_account_activity_seen{network=~\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "D",
           "range": false,
           "instant": true,
@@ -653,7 +654,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (account) (gm_account_eth_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"})",
+          "expr": "max by (account) (gm_account_eth_balance{network=~\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -665,7 +666,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (account) (gm_account_remediation_below{network=\"$network\", asset=\"eth\", group=~\"$group\", account=~\"$account\"})",
+          "expr": "max by (account) (gm_account_remediation_below{network=~\"$network\", asset=\"eth\", group=~\"$group\", account=~\"$account\"})",
           "refId": "B",
           "range": true,
           "instant": false,
@@ -766,7 +767,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (account) (gm_account_grt_balance{network=\"$network\", group=~\"$group\", account=~\"$account\"})",
+          "expr": "max by (account) (gm_account_grt_balance{network=~\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -778,7 +779,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (account) (gm_account_remediation_below{network=\"$network\", asset=\"grt\", group=~\"$group\", account=~\"$account\"})",
+          "expr": "max by (account) (gm_account_remediation_below{network=~\"$network\", asset=\"grt\", group=~\"$group\", account=~\"$account\"})",
           "refId": "B",
           "range": true,
           "instant": false,
@@ -891,7 +892,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (account) (gm_account_idle_seconds{network=\"$network\", group=~\"$group\", account=~\"$account\"})",
+          "expr": "max by (account) (gm_account_idle_seconds{network=~\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -962,7 +963,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (group, account, address) (gm_account_activity_seen{network=\"$network\", group=~\"$group\", account=~\"$account\"}) == 0",
+          "expr": "max by (group, account, address) (gm_account_activity_seen{network=~\"$network\", group=~\"$group\", account=~\"$account\"}) == 0",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -1050,7 +1051,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (group, owner, spender) (gm_account_allowance_unlimited{network=\"$network\", group=~\"$group\"})",
+          "expr": "max by (group, owner, spender) (gm_account_allowance_unlimited{network=~\"$network\", group=~\"$group\"})",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -1062,7 +1063,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (group, owner, spender) (gm_account_allowance_exact_max{network=\"$network\", group=~\"$group\"})",
+          "expr": "max by (group, owner, spender) (gm_account_allowance_exact_max{network=~\"$network\", group=~\"$group\"})",
           "refId": "B",
           "range": false,
           "instant": true,
@@ -1074,7 +1075,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (group, owner, spender) (gm_account_allowance_grt{network=\"$network\", group=~\"$group\"})",
+          "expr": "max by (group, owner, spender) (gm_account_allowance_grt{network=~\"$network\", group=~\"$group\"})",
           "refId": "C",
           "range": false,
           "instant": true,
@@ -1245,7 +1246,7 @@
         "x": 0,
         "y": 41
       },
-      "description": "One row per configured subgraph, checked every cycle with a _meta query. Up means it answered, served the expected deployment, reported no indexing errors and was within max_lag. Blank cells mean that number could not be measured this cycle, not that it is zero.",
+      "description": "One row per subgraph check: the published version, plus each listed deployment. Up means it answered, from the expected deployment, without indexing errors and within max_lag. \"Not checked\" means our side failed (e.g. API key) and says nothing about the subgraph. Blank cells mean that number could not be measured this cycle, not that it is zero. Subgraphs on every chain are listed, not just the selected network; Blocks behind is only measured for the chain graph-monitor's RPC serves.",
       "targets": [
         {
           "datasource": {
@@ -1257,7 +1258,7 @@
           "range": false,
           "instant": true,
           "format": "table",
-          "expr": "max by (source) (gm_source_up{network=\"$network\", source=~\"subgraph:.*\"})"
+          "expr": "max by (network, subgraph, deployment) (gm_subgraph_up)"
         },
         {
           "datasource": {
@@ -1269,7 +1270,7 @@
           "range": false,
           "instant": true,
           "format": "table",
-          "expr": "max by (source) (gm_source_blocks_behind{network=\"$network\", source=~\"subgraph:.*\"})"
+          "expr": "max by (network, subgraph, deployment) (gm_subgraph_blocks_behind)"
         },
         {
           "datasource": {
@@ -1281,7 +1282,7 @@
           "range": false,
           "instant": true,
           "format": "table",
-          "expr": "max by (source) (gm_source_lag_seconds{network=\"$network\", source=~\"subgraph:.*\"})"
+          "expr": "max by (network, subgraph, deployment) (gm_subgraph_lag_seconds)"
         },
         {
           "datasource": {
@@ -1293,7 +1294,19 @@
           "range": false,
           "instant": true,
           "format": "table",
-          "expr": "max by (source) (gm_source_block_height{network=\"$network\", source=~\"subgraph:.*\"})"
+          "expr": "max by (network, subgraph, deployment) (gm_subgraph_block_height)"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "refId": "E",
+          "range": false,
+          "instant": true,
+          "format": "table",
+          "expr": "max by (network, subgraph, deployment) (gm_subgraph_not_checked)"
         }
       ],
       "transformations": [
@@ -1308,18 +1321,24 @@
               "Time": true
             },
             "renameByName": {
-              "source": "Subgraph",
+              "subgraph": "Subgraph",
+              "deployment": "Deployment",
               "Value #A": "Up",
               "Value #B": "Blocks behind",
               "Value #C": "Lag",
-              "Value #D": "Indexed block"
+              "Value #D": "Indexed block",
+              "Value #E": "Not checked",
+              "network": "Chain"
             },
             "indexByName": {
-              "source": 0,
-              "Value #A": 1,
-              "Value #B": 2,
-              "Value #C": 3,
-              "Value #D": 4
+              "subgraph": 0,
+              "network": 1,
+              "deployment": 2,
+              "Value #A": 3,
+              "Value #E": 4,
+              "Value #B": 5,
+              "Value #C": 6,
+              "Value #D": 7
             }
           }
         }
@@ -1426,6 +1445,39 @@
                 "value": 0
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Not checked"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "not checked",
+                        "color": "orange",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
           }
         ]
       }
@@ -1452,8 +1504,8 @@
           },
           "editorMode": "code",
           "refId": "A",
-          "legendFormat": "{{source}}",
-          "expr": "max by (source) (gm_source_lag_seconds{network=\"$network\", source=~\"subgraph:.*\"})"
+          "legendFormat": "{{subgraph}} {{deployment}}",
+          "expr": "max by (network, subgraph, deployment) (gm_subgraph_lag_seconds)"
         }
       ],
       "fieldConfig": {
@@ -1515,7 +1567,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (watch) (rate(gm_read_errors_total{network=\"$network\"}[$__rate_interval]))",
+          "expr": "sum by (watch) (rate(gm_read_errors_total{network=~\"$network\"}[$__rate_interval]))",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -1669,7 +1721,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum by (le, watch) (rate(gm_read_duration_seconds_bucket{network=\"$network\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, watch) (rate(gm_read_duration_seconds_bucket{network=~\"$network\"}[$__rate_interval])))",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -1752,7 +1804,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (outcome, account) (increase(gm_remediation_total{network=\"$network\"}[$__rate_interval]))",
+          "expr": "sum by (outcome, account) (increase(gm_remediation_total{network=~\"$network\"}[$__rate_interval]))",
           "refId": "A",
           "range": true,
           "instant": false,
@@ -1829,12 +1881,21 @@
           "refId": "network"
         },
         "definition": "label_values(gm_block_height, network)",
-        "current": {},
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
         "refresh": 2,
-        "includeAll": false,
-        "multi": false,
+        "includeAll": true,
+        "multi": true,
         "sort": 1,
-        "hide": 0
+        "hide": 0,
+        "allValue": ".*"
       },
       {
         "name": "group",
@@ -1845,10 +1906,10 @@
         },
         "label": "Group",
         "query": {
-          "query": "label_values(gm_account_eth_balance{network=\"$network\"}, group)",
+          "query": "label_values(gm_account_eth_balance{network=~\"$network\"}, group)",
           "refId": "group"
         },
-        "definition": "label_values(gm_account_eth_balance{network=\"$network\"}, group)",
+        "definition": "label_values(gm_account_eth_balance{network=~\"$network\"}, group)",
         "current": {},
         "refresh": 2,
         "includeAll": true,
@@ -1866,10 +1927,10 @@
         },
         "label": "Account",
         "query": {
-          "query": "label_values(gm_account_eth_balance{network=\"$network\", group=~\"$group\"}, account)",
+          "query": "label_values(gm_account_eth_balance{network=~\"$network\", group=~\"$group\"}, account)",
           "refId": "account"
         },
-        "definition": "label_values(gm_account_eth_balance{network=\"$network\", group=~\"$group\"}, account)",
+        "definition": "label_values(gm_account_eth_balance{network=~\"$network\", group=~\"$group\"}, account)",
         "current": {},
         "refresh": 2,
         "includeAll": true,

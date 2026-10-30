@@ -13,7 +13,8 @@ Two rules shape everything it reports:
   whether a value is acceptable is decided in Grafana. The one exception is the optional
   remediation trigger (see [Remediation](#remediation)).
 
-All data comes from RPC. There is no subgraph or explorer dependency.
+Every value the tool reads comes from RPC. Subgraphs are checked as components of the network,
+but nothing is read from them yet.
 
 ## Usage
 
@@ -26,11 +27,16 @@ cargo build --release
 |---|---|
 | `status` | Read every watch and show what it found. `--flat` for one line per watch, `--unreadable-only` for failures only. |
 | `config show` | What config resolved to after layering, env expansion and name resolution. |
-| `config addresses` | The address book for the active network. |
+| `config addresses` | The address book of every network. |
 | `serve` | Run a cycle every `--interval` seconds (default 120) and export metrics on `--metrics-port` (default 9090). |
 
 `status` and `serve` take repeatable filters: `--account <label|addr>`, `--group <name>`,
 `--kind <kind>` and `--spender <name|addr>`.
+
+Every configured network runs: each network with accounts, and each whose subgraphs have an RPC
+to be measured against. Every row says which chain it is on. `--network <name>` narrows a run to
+one network. `--block` and `--rpc-url` apply to a single chain, so they need `--network` once more
+than one network would run.
 
 Useful global flags: `--network`, `--rpc-url`, `--block <n|latest>`, `--json`, `--config <path>`,
 `--no-defaults`, `-v`/`-vv`. Run `graph-monitor --help` for the full list.
@@ -39,7 +45,7 @@ Useful global flags: `--network`, `--rpc-url`, `--block <n|latest>`, `--json`, `
 |---|---|
 | 0 | The cycle ran. Some watches may be unreadable; that is reported, not fatal. |
 | 2 | Usage or config error. |
-| 3 | The RPC source failed verification, so nothing could be read. |
+| 3 | A network's RPC failed verification, so that network's watches were not read. A network that runs only for its subgraphs does not count. |
 
 ## Docker
 
@@ -54,8 +60,22 @@ see [RELEASE.md](RELEASE.md) for the tags.
 ## Configuration
 
 The shipped [`config/default.toml`](config/default.toml) is compiled into the binary. It holds the
-Arbitrum One network, an address book, and the default list of watched accounts, so the tool runs
-with no config at all.
+sources, the Arbitrum One and Gnosis networks, an address book, the default list of watched
+accounts, and the subgraphs to check, so the tool runs with no config at all.
+
+The config separates two things:
+
+- **Sources** are what the tool reads from: `[sources.rpc.<network>]` and
+  `[sources.subgraph.<network>]`, both keyed by the chain they serve. Each is verified every cycle before anything is read through it; if
+  one is down, the tool is blind, which is a problem with the tool rather than with the network. A
+  network's RPC is how its watches read, and what its subgraphs are measured against. A subgraph
+  source sets exactly one of `id`, `deployment` or `url` (and an optional `label`), and must
+  answer from the expected deployment, without indexing errors, within `max_lag` (default 15
+  minutes). The same subgraph can also be monitored under `[[subgraphs.*]]`.
+- **Everything else** is what the tool watches, each keyed by network: address books
+  (`[addresses.<network>]`), accounts, and subgraphs. Chain ids are built in for well-known
+  networks (mainnet, sepolia, arbitrum-one, arbitrum-sepolia, gnosis); any other network sets
+  `chain_id` in its `[sources.rpc.<network>]`, and every RPC is checked against it.
 
 Layers, later wins:
 
@@ -65,15 +85,18 @@ Layers, later wins:
 4. Environment variables
 5. Command-line flags
 
-Merging is per key: a user config that sets one `rpc_url` keeps every shipped address, and user
+Merging is per key: a user config that sets one RPC `url` keeps the shipped `max_lag`, and user
 accounts are added to the shipped list. A user account with the same label as a shipped one
 replaces it, and `enabled = false` drops it. `use_defaults = false` (or `--no-defaults`) ignores
 the shipped layer completely. `${VAR}` in any string value is expanded from the environment, so
 API keys stay out of the file.
 
 ```toml
-[networks.arbitrum-one]
-rpc_url = "${ARBITRUM_ONE_RPC_URL}"
+[sources.rpc.arbitrum-one]
+url             = "${ARBITRUM_ONE_RPC_URL}"
+max_lag         = "60s"   # how stale the head may be before the source is called down
+max_concurrency = 6       # requests in flight
+max_log_range   = 10000   # largest eth_getLogs span to try
 
 [[accounts.arbitrum-one]]
 address = "0x..."
@@ -85,24 +108,32 @@ watch   = ["eth", "grt"]
 | Environment variable | Same as |
 |---|---|
 | `GRAPH_MONITOR_CONFIG` | `--config` |
-| `GRAPH_MONITOR_NETWORK` | `--network` |
-| `GRAPH_MONITOR_RPC_URL` | `--rpc-url` |
+| `GRAPH_MONITOR_NETWORK` | `--network` (run only this network) |
+| `GRAPH_MONITOR_RPC_URL` | `--rpc-url` (needs `--network` when several networks run) |
 | `GRAPH_MONITOR_METRICS_PORT` | `serve --metrics-port` |
 
-The shipped RPC endpoint is the free public one, which rate-limits quickly. Point `rpc_url` at a
-real provider for anything beyond a quick look.
+The shipped RPC endpoints are the free public ones, which rate-limit quickly. Point `url` at a real
+provider for anything beyond a quick look.
+
+Older configs had a `[networks.<network>]` block holding the RPC settings, chain id, address book and
+signer key. A config still using it fails with an error mapping each field to its new place.
 
 ## Subgraphs
 
-Each configured subgraph is checked every cycle with one `_meta` query: does it answer, and how far
-is its latest indexed block behind the chain head. A subgraph is reported down when it does not
-answer, serves a different deployment than the one asked for, reports indexing errors, or
-trails the clock by more than `max_lag` (default 15 minutes). No watch reads from a subgraph, so a
-down subgraph never makes anything else unreadable.
+Subgraphs are part of the network being monitored, like account balances. The RPC is different:
+it is how the tool sees, so the RPC being down means the tool is blind, while a subgraph being down
+is a finding about the network.
 
-List subgraphs under the network they index; that chain's head is what the block gap is measured
-against. Gateway queries send the API key as a bearer token. Without a key, gateway subgraphs report
-unreadable and everything else runs normally.
+Each configured subgraph is checked every cycle with one `_meta` query: does it answer, and how far
+is its latest indexed block behind the chain head. It is reported **down** when it does not answer,
+serves a different deployment than the one asked for, reports indexing errors, or trails the clock
+by more than `max_lag` (default 15 minutes). It is reported **not checked** when the problem is on
+our side, such as a missing or rejected API key; that says nothing about the subgraph.
+
+List subgraphs under the network they index. Every subgraph is checked on every run, whichever chain
+it indexes, since checking one needs only the gateway. Blocks behind is measured only for subgraphs
+on the chain the tool's RPC serves; for others it is left blank rather than measured against the
+wrong chain. Gateway queries send the API key as a bearer token.
 
 ```toml
 [gateway]
@@ -116,8 +147,7 @@ max_lag     = "15m"
 ```
 
 The `id` check follows whatever version is published. Each entry in `deployments` is checked
-separately as `network@Qm…`, which covers an upgrade: the new version indexing while the old one
-still serves.
+separately, which covers an upgrade: the new version indexing while the old one still serves.
 
 ## Remediation
 
@@ -127,7 +157,7 @@ A key alone does nothing; the flag without a key is an error naming the TOML to 
 forms the repair and logs it without broadcasting. Nothing ships enabled.
 
 ```toml
-[networks.arbitrum-one]
+[remediation.arbitrum-one]
 signer_key = "${GRAPH_MONITOR_SIGNER_KEY}"
 
 [accounts.arbitrum-one.eth.remediate]
