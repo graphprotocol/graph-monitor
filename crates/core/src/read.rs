@@ -90,6 +90,9 @@ pub struct ReadCtx<'a> {
     /// Set when failures look like the endpoint cannot serve state at this block at all,
     /// rather than one address being odd.
     state_fault: Option<String>,
+    /// Last-seen records from a verified subgraph source, when this network has one. Answers
+    /// event searches without scanning logs; anything it does not cover falls back to the chain.
+    activity: Option<crate::subgraph::ActivityIndex>,
 }
 
 impl<'a> ReadCtx<'a> {
@@ -106,6 +109,7 @@ impl<'a> ReadCtx<'a> {
             allowances: HashMap::new(),
             planned: plan.clone(),
             state_fault: None,
+            activity: None,
         };
 
         // Call layout is fixed so flat results map back without bookkeeping.
@@ -309,13 +313,39 @@ impl<'a> ReadCtx<'a> {
         .await
     }
 
-    /// The most recent matching event involving this account, searched back from the pinned
-    /// block. Not batchable, and unlike the nonce search it needs no archive endpoint.
+    /// Attach last-seen records from a subgraph source.
+    pub fn with_activity(mut self, index: crate::subgraph::ActivityIndex) -> Self {
+        self.activity = Some(index);
+        self
+    }
+
+    /// The most recent matching event involving this account.
+    ///
+    /// From the subgraph when it covers the event, otherwise searched back from the pinned
+    /// block. The subgraph attributes events by transaction sender only, so a `match = "to"`
+    /// watch always searches.
     pub async fn last_event(
         &self,
         address: Address,
         spec: &crate::config::ActivitySpec,
     ) -> Result<crate::activity::Activity, String> {
+        use crate::activity::{Activity, TxMatch};
+        use crate::subgraph::ActivityLookup;
+
+        if let (Some(index), TxMatch::From) = (&self.activity, spec.matches) {
+            match index.lookup(spec.emitter.address, spec.topic0, address) {
+                // Saturating: a subgraph a block ahead of our pin is not negative idle time.
+                ActivityLookup::Last { block, timestamp } => {
+                    return Ok(Activity::Last {
+                        block,
+                        idle_seconds: self.block.timestamp.saturating_sub(timestamp),
+                    })
+                }
+                ActivityLookup::Never => return Ok(Activity::Never),
+                ActivityLookup::NotIndexed => {}
+            }
+        }
+
         crate::activity::find_last_event(
             self.client,
             address,
@@ -366,6 +396,89 @@ fn is_state_unavailable(error: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::activity::{Activity, TxMatch};
+    use crate::config::{ActivitySpec, Spender};
+    use crate::subgraph::{activity_id, ActivityIndex};
+
+    fn spec(matches: TxMatch) -> ActivitySpec {
+        let event = "OracleVote(bytes32,bool,uint256,uint256)";
+        ActivitySpec {
+            emitter: Spender {
+                display: "SubgraphAvailabilityManager".into(),
+                address: Address::repeat_byte(0xaa),
+            },
+            event: event.into(),
+            topic0: alloy::primitives::keccak256(event.as_bytes()),
+            lookback: std::time::Duration::from_secs(7 * 86_400),
+            matches,
+        }
+    }
+
+    /// A context on an endpoint that refuses connections: any read that reaches the chain
+    /// fails, so a result proves the subgraph answered.
+    async fn offline_ctx(now: u64) -> ReadCtx<'static> {
+        let client = Box::leak(Box::new(
+            Client::new("http://127.0.0.1:1", Address::ZERO, 1, 100).unwrap(),
+        ));
+        let block = PinnedBlock {
+            number: 1_000,
+            timestamp: now,
+        };
+        ReadCtx::prefetch(client, block, &ReadPlan::default()).await
+    }
+
+    #[tokio::test]
+    async fn a_subgraph_answer_replaces_the_log_search() {
+        let s = spec(TxMatch::From);
+        let (voter, silent) = (Address::repeat_byte(1), Address::repeat_byte(2));
+        let index = ActivityIndex::from_records([
+            (
+                activity_id(s.emitter.address, s.topic0, voter),
+                (900, 10_000),
+            ),
+            (
+                activity_id(s.emitter.address, s.topic0, Address::ZERO),
+                (950, 12_000),
+            ),
+        ]);
+        let ctx = offline_ctx(20_000).await.with_activity(index);
+
+        assert_eq!(
+            ctx.last_event(voter, &s).await.unwrap(),
+            Activity::Last {
+                block: 900,
+                idle_seconds: 10_000
+            }
+        );
+        // Indexed, never done by this sender: an answer, not a search.
+        assert_eq!(ctx.last_event(silent, &s).await.unwrap(), Activity::Never);
+    }
+
+    #[tokio::test]
+    async fn what_the_subgraph_cannot_answer_goes_to_the_chain() {
+        let s = spec(TxMatch::From);
+        let voter = Address::repeat_byte(1);
+        // An index that knows nothing about this event.
+        let ctx = offline_ctx(20_000)
+            .await
+            .with_activity(ActivityIndex::default());
+        assert!(
+            ctx.last_event(voter, &s).await.is_err(),
+            "should have searched"
+        );
+
+        // `match = "to"` is never answered by the subgraph, which attributes by sender.
+        let to = spec(TxMatch::To);
+        let index = ActivityIndex::from_records([(
+            activity_id(to.emitter.address, to.topic0, voter),
+            (900, 10_000),
+        )]);
+        let ctx = offline_ctx(20_000).await.with_activity(index);
+        assert!(
+            ctx.last_event(voter, &to).await.is_err(),
+            "should have searched"
+        );
+    }
 
     #[test]
     fn plan_deduplicates_reads() {

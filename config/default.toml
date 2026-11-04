@@ -24,6 +24,8 @@ url = "https://rpc.gnosischain.com"
 max_lag = "60s"
 max_concurrency = 6
 
+# Answers every activity watch on arbitrum-one from its generic Activity entities, in one
+# query per cycle. Down, or not indexing an event, those watches search the chain instead.
 [sources.subgraph.arbitrum-one]
 label = "graph-monitor"
 id    = "9DR6unCi6gxi5CfJDszZygF4uA4j2qyTCxsJttw1CwdK"
@@ -60,6 +62,7 @@ PaymentsEscrow              = "0xf6Fcc27aAf1fcD8B254498c9794451d82afC673E"
 EBODataEdge                 = "0x633bb9790d7c4c59991cebd377c0ed6501a35ebe"
 SubgraphAvailabilityManager = "0x1cb555359319a94280acf85372ac2323aae2f5fd"
 RewardsEligibilityContract  = "0x02753BaE61C08AbD4351Bce7F48524935C2Cc78E"
+L2Curation                  = "0x22d78fb4bc72e191C765807f8891B5e1785C8014"
 
 # ---------------------------------------------------------------------------------------
 # Accounts
@@ -128,6 +131,12 @@ watch   = ["eth"]
 address = "UpgradeIndexerCurationBot"
 group   = "infra"
 watch   = ["eth"]
+
+  # Signalled is emitted for every curator, thousands of times. Answered by the subgraph
+  # source in one lookup; searching the chain for it instead is slow.
+  [accounts.arbitrum-one.activity]
+  emitter = "L2Curation"
+  event   = "Signalled(address,bytes32,uint256,uint256,uint256)"
 
 # SAM: Edge & Node
 [[accounts.arbitrum-one]]

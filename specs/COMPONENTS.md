@@ -23,7 +23,7 @@ component's own dashboard, not in this tool.
   - ✅ Balance watch: ETH.
   - ✅ Balance watch: GRT.
   - ✅ Allowance watch: GRT to `NetworkMonitor`.
-  - ⬜ Activity watch: calls to Billing contract to pull tokens.
+  - ✅ Activity watch: calls to Billing contract to pull tokens.
     - Billing Contract: `0x1b07d3344188908fb6deceac381f3ee63c48477a`
     - `event TokensPulled(address indexed user, uint256 amount);`
 - ✅ Account `GraphTallyWallet`: Funds indexer escrow.
@@ -72,16 +72,16 @@ component's own dashboard, not in this tool.
   - `event OracleVote(bytes32 indexed subgraphDeploymentID, bool deny, uint256 indexed oracleIndex, uint256 timestamp);`
 - ✅ Account `SamOracleEdgeAndNode`: Availability oracle operated by Edge & Node.
   - ✅ Balance watch: ETH.
-  - ⬜ Activity watch: wallet voting
+  - ✅ Activity watch: wallet voting
 - ✅ Account `SamOracleGraphOps`: Availability oracle operated by GraphOps.
   - ✅ Balance watch: ETH.
-  - ⬜ Activity watch: wallet voting
+  - ✅ Activity watch: wallet voting
 - ✅ Account `SamOracleInfraDAO`: Availability oracle operated by InfraDAO.
   - ✅ Balance watch: ETH.
-  - ⬜ Activity watch: wallet voting
+  - ✅ Activity watch: wallet voting
 - ✅ Account `SamOracleSemiotic`: Availability oracle operated by Semiotic.
   - ✅ Balance watch: ETH.
-  - ⬜ Activity watch: wallet voting
+  - ✅ Activity watch: wallet voting
 - ⬜ SAM activity: vote consensus
   - contract: `0x971B9d3d0Ae3ECa029CAB5eA1fB0F72c85e6a525` (RewardsManager)
   - `event RewardsDenylistUpdated(bytes32 indexed subgraphDeploymentID, uint256 sinceBlock);`
@@ -92,7 +92,7 @@ component's own dashboard, not in this tool.
 
 - ✅ Account `RewardsEligibilityOracle`: Marks which indexers may earn indexing rewards.
   - ✅ Balance watch: ETH.
-  - ⬜ Activity watch: eligibility updates.
+  - ✅ Activity watch: eligibility updates.
     - contract: `0x02753BaE61C08AbD4351Bce7F48524935C2Cc78E`  (RewardsEligibilityOracle)
     - `event IndexerEligibilityRenewed(address indexed indexer, address indexed oracle);`
 
@@ -109,7 +109,7 @@ component's own dashboard, not in this tool.
 
 - ✅ Account `UpgradeIndexerCurationBot`: Signals curation so the upgrade indexer serves new subgraphs.
   - ✅ Balance watch: ETH.
-  - ⬜ Activity watch: curation signals on newly published subgraphs.
+  - ✅ Activity watch: curation signals (L2Curation `Signalled`), from the subgraph source.
 - ⬜ Curation signals landing. Newly published subgraphs are actually being signalled.
 
 ---

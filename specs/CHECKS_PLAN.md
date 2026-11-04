@@ -133,8 +133,10 @@ Per source, stage 0 asserts:
 
 Implemented in `crates/core/src/source.rs`; subgraph sources are configured under
 `[sources.subgraph.<network>]` and verified with the same check as monitored subgraphs, read as a
-source verdict (a subgraph that cannot be queried at all counts as down). Nothing reads through a
-subgraph source yet, so one being down blinds no watch. Subgraphs that are merely
+source verdict (a subgraph that cannot be queried at all counts as down). Sources are verified
+before the watches read. A verified subgraph source answers activity watches from its generic
+`Activity` entities; when it is down, or does not index an event, those watches fall back to the
+RPC log search, so a subgraph outage costs speed and reach, never correctness. Subgraphs that are merely
 *monitored* (network, analytics, EBO, QoS) are components, not sources: they are checked in
 `crates/core/src/subgraph.rs` and reported beside balances, and a failure there is a finding about
 the network rather than a blind spot in the tool. Both roles share the same `_meta` query and

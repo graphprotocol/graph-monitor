@@ -13,8 +13,9 @@ Two rules shape everything it reports:
   whether a value is acceptable is decided in Grafana. The one exception is the optional
   remediation trigger (see [Remediation](#remediation)).
 
-Every value the tool reads comes from RPC. Subgraphs are checked as components of the network,
-but nothing is read from them yet.
+Balances, allowances and everything else read live come from RPC. Account activity ("last seen")
+comes from a subgraph source when the account's network has one, and from an RPC log search
+otherwise.
 
 ## Usage
 
@@ -72,6 +73,14 @@ The config separates two things:
   source sets exactly one of `id`, `deployment` or `url` (and an optional `label`), and must
   answer from the expected deployment, without indexing errors, within `max_lag` (default 15
   minutes). The same subgraph can also be monitored under `[[subgraphs.*]]`.
+
+  A subgraph source answers activity watches. If it carries generic `Activity` entities (id
+  `<emitter>-<topic0>-<sender>`), every watch with an `activity` block on that network reads its
+  account's last-seen record in one query per cycle, instead of scanning logs. The tool knows
+  nothing about which events a subgraph indexes: an event with no "any sender" record is not
+  indexed, and that watch searches the chain instead. So do `match = "to"` watches, and every
+  watch while the source is down. A record older than the account's `lookback` still reports its
+  idle time, but does not count as seen.
 - **Everything else** is what the tool watches, each keyed by network: address books
   (`[addresses.<network>]`), accounts, and subgraphs. Chain ids are built in for well-known
   networks (mainnet, sepolia, arbitrum-one, arbitrum-sepolia, gnosis); any other network sets

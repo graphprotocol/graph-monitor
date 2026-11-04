@@ -100,7 +100,7 @@
         },
         "overrides": []
       },
-      "description": "Stage 0 verified every source the tool reads from: reachable, right chain, head fresh. If this is down, the tool is blind, not the network."
+      "description": "Up only if every source passed verification: each network's RPC and any subgraph source. Which one is down: see Sources now."
     },
     {
       "type": "stat",
@@ -292,7 +292,8 @@
           "unit": "s"
         },
         "overrides": []
-      }
+      },
+      "description": "The worst lag across all sources. Per source: see Sources now."
     },
     {
       "type": "stat",
@@ -412,12 +413,198 @@
     },
     {
       "type": "row",
-      "title": "Accounts",
+      "title": "Sources",
+      "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 5
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Sources now",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "description": "What graph-monitor reads from: each network's RPC (rpc:<network>) and any subgraph source (subgraph:<label>). Verified every cycle before anything is read through it. Down means the tool is blind to what it serves: every watch on a down RPC's network is unreadable; a down subgraph source makes activity watches fall back to searching the chain.",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "refId": "A",
+          "range": false,
+          "instant": true,
+          "format": "table",
+          "expr": "max by (network, source) (gm_source_up{network=~\"$network\"})"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "refId": "B",
+          "range": false,
+          "instant": true,
+          "format": "table",
+          "expr": "max by (network, source) (gm_source_block_height{network=~\"$network\"})"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "refId": "C",
+          "range": false,
+          "instant": true,
+          "format": "table",
+          "expr": "max by (network, source) (gm_source_lag_seconds{network=~\"$network\"})"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "source": "Source",
+              "network": "Chain",
+              "Value #A": "Up",
+              "Value #B": "Block",
+              "Value #C": "Lag"
+            },
+            "indexByName": {
+              "source": 0,
+              "network": 1,
+              "Value #A": 2,
+              "Value #B": 3,
+              "Value #C": 4
+            }
+          }
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Up"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "0": {
+                        "text": "down",
+                        "color": "red",
+                        "index": 0
+                      },
+                      "1": {
+                        "text": "up",
+                        "color": "green",
+                        "index": 1
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Block"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Lag"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "row",
+      "title": "Accounts",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 12
       },
       "collapsed": false,
       "panels": []
@@ -433,7 +620,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 6
+        "y": 13
       },
       "targets": [
         {
@@ -442,7 +629,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (group, account, address) (gm_account_eth_balance{network=~\"$network\", group=~\"$group\", account=~\"$account\"})",
+          "expr": "max by (network, group, account, address) (gm_account_eth_balance{network=~\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -454,7 +641,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (group, account, address) (gm_account_grt_balance{network=~\"$network\", group=~\"$group\", account=~\"$account\"})",
+          "expr": "max by (network, group, account, address) (gm_account_grt_balance{network=~\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "B",
           "range": false,
           "instant": true,
@@ -466,7 +653,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (group, account, address) (gm_account_idle_seconds{network=~\"$network\", group=~\"$group\", account=~\"$account\"})",
+          "expr": "max by (network, group, account, address) (gm_account_idle_seconds{network=~\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "C",
           "range": false,
           "instant": true,
@@ -478,7 +665,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (group, account, address) (gm_account_activity_seen{network=~\"$network\", group=~\"$group\", account=~\"$account\"})",
+          "expr": "max by (network, group, account, address) (gm_account_activity_seen{network=~\"$network\", group=~\"$group\", account=~\"$account\"})",
           "refId": "D",
           "range": false,
           "instant": true,
@@ -504,16 +691,18 @@
               "Value #A": "ETH",
               "Value #B": "GRT",
               "Value #C": "Idle",
-              "Value #D": "Seen"
+              "Value #D": "Seen",
+              "network": "Chain"
             },
             "indexByName": {
               "group": 0,
               "account": 1,
-              "address": 2,
-              "Value #A": 3,
-              "Value #B": 4,
-              "Value #C": 5,
-              "Value #D": 6
+              "network": 2,
+              "address": 3,
+              "Value #A": 4,
+              "Value #B": 5,
+              "Value #C": 6,
+              "Value #D": 7
             }
           }
         }
@@ -645,7 +834,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 15
+        "y": 22
       },
       "targets": [
         {
@@ -758,7 +947,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 15
+        "y": 22
       },
       "targets": [
         {
@@ -867,7 +1056,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 23
+        "y": 30
       },
       "collapsed": false,
       "panels": []
@@ -883,7 +1072,7 @@
         "h": 8,
         "w": 16,
         "x": 0,
-        "y": 24
+        "y": 31
       },
       "targets": [
         {
@@ -899,7 +1088,7 @@
           "legendFormat": "{{account}}"
         }
       ],
-      "description": "Seconds since the account last did the thing it exists to do, measured at the pinned block. A line climbing without resetting is an account that has gone quiet.",
+      "description": "Time since the account last did the thing it exists to do, measured at the pinned block. A line climbing without resetting is an account that has gone quiet. Log scale, so an account quiet for months does not flatten the ones measured in hours. With a subgraph source, quiet accounts keep a value past their lookback instead of turning unreadable.",
       "options": {
         "legend": {
           "displayMode": "table",
@@ -917,7 +1106,6 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "min": 0,
           "custom": {
             "drawStyle": "line",
             "lineWidth": 2,
@@ -925,7 +1113,11 @@
             "showPoints": "never",
             "spanNulls": true,
             "axisPlacement": "auto",
-            "gradientMode": "opacity"
+            "gradientMode": "opacity",
+            "scaleDistribution": {
+              "type": "log",
+              "log": 10
+            }
           },
           "color": {
             "mode": "palette-classic"
@@ -954,7 +1146,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 24
+        "y": 31
       },
       "targets": [
         {
@@ -963,28 +1155,50 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (group, account, address) (gm_account_activity_seen{network=~\"$network\", group=~\"$group\", account=~\"$account\"}) == 0",
           "refId": "A",
           "range": false,
           "instant": true,
-          "format": "table"
+          "format": "table",
+          "expr": "max by (network, group, account) (gm_account_activity_seen{network=~\"$network\", group=~\"$group\", account=~\"$account\"}) == 0"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "refId": "B",
+          "range": false,
+          "instant": true,
+          "format": "table",
+          "expr": "max by (network, group, account) (gm_account_idle_seconds{network=~\"$network\", group=~\"$group\", account=~\"$account\"}) and on (network, group, account) (max by (network, group, account) (gm_account_activity_seen{network=~\"$network\", group=~\"$group\", account=~\"$account\"}) == 0)"
         }
       ],
-      "description": "Read successfully, found nothing in the window. Empty is the healthy state. This is NOT the same as an unreadable watch.",
+      "description": "Read successfully, nothing within the account's lookback. Empty is the healthy state, and this is NOT the same as an unreadable watch. Quiet for = time since the last event, when known (a subgraph source knows it past the lookback); blank means no event was ever found.",
       "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
         {
           "id": "organize",
           "options": {
             "excludeByName": {
               "Time": true,
-              "Value": true,
-              "address": true
+              "Value #A": true
             },
             "renameByName": {
               "account": "Account",
-              "group": "Group"
+              "group": "Group",
+              "Value #B": "Quiet for",
+              "network": "Chain"
             },
-            "indexByName": {}
+            "indexByName": {
+              "account": 0,
+              "network": 1,
+              "group": 2,
+              "Value #B": 3
+            }
           }
         }
       ],
@@ -1016,7 +1230,24 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Quiet for"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
       }
     },
     {
@@ -1026,7 +1257,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 32
+        "y": 39
       },
       "collapsed": false,
       "panels": []
@@ -1042,7 +1273,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 33
+        "y": 40
       },
       "targets": [
         {
@@ -1051,7 +1282,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (group, owner, spender) (gm_account_allowance_unlimited{network=~\"$network\", group=~\"$group\"})",
+          "expr": "max by (network, group, owner, spender) (gm_account_allowance_unlimited{network=~\"$network\", group=~\"$group\"})",
           "refId": "A",
           "range": false,
           "instant": true,
@@ -1063,7 +1294,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (group, owner, spender) (gm_account_allowance_exact_max{network=~\"$network\", group=~\"$group\"})",
+          "expr": "max by (network, group, owner, spender) (gm_account_allowance_exact_max{network=~\"$network\", group=~\"$group\"})",
           "refId": "B",
           "range": false,
           "instant": true,
@@ -1075,7 +1306,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "max by (group, owner, spender) (gm_account_allowance_grt{network=~\"$network\", group=~\"$group\"})",
+          "expr": "max by (network, group, owner, spender) (gm_account_allowance_grt{network=~\"$network\", group=~\"$group\"})",
           "refId": "C",
           "range": false,
           "instant": true,
@@ -1100,15 +1331,17 @@
               "spender": "Spender",
               "Value #A": "Unlimited",
               "Value #B": "Untouched max",
-              "Value #C": "Raw GRT"
+              "Value #C": "Raw GRT",
+              "network": "Chain"
             },
             "indexByName": {
               "group": 0,
               "owner": 1,
-              "spender": 2,
-              "Value #A": 3,
-              "Value #B": 4,
-              "Value #C": 5
+              "network": 2,
+              "spender": 3,
+              "Value #A": 4,
+              "Value #B": 5,
+              "Value #C": 6
             }
           }
         }
@@ -1229,7 +1462,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 40
+        "y": 47
       },
       "panels": []
     },
@@ -1244,7 +1477,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 41
+        "y": 48
       },
       "description": "One row per subgraph check: the published version, plus each listed deployment. Up means it answered, from the expected deployment, without indexing errors and within max_lag. \"Not checked\" means our side failed (e.g. API key) and says nothing about the subgraph. Blank cells mean that number could not be measured this cycle, not that it is zero. Subgraphs on every chain are listed, not just the selected network; Blocks behind is only measured for the chain graph-monitor's RPC serves.",
       "targets": [
@@ -1493,7 +1726,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 41
+        "y": 48
       },
       "description": "How far each subgraph's latest indexed block trails the wall clock. A line that stops means the subgraph could not be read.",
       "targets": [
@@ -1542,7 +1775,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 49
+        "y": 56
       },
       "collapsed": false,
       "panels": []
@@ -1558,7 +1791,7 @@
         "h": 7,
         "w": 8,
         "x": 0,
-        "y": 50
+        "y": 57
       },
       "targets": [
         {
@@ -1629,7 +1862,7 @@
         "h": 7,
         "w": 8,
         "x": 8,
-        "y": 50
+        "y": 57
       },
       "targets": [
         {
@@ -1712,7 +1945,7 @@
         "h": 7,
         "w": 8,
         "x": 16,
-        "y": 50
+        "y": 57
       },
       "targets": [
         {
@@ -1779,7 +2012,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 57
+        "y": 64
       },
       "collapsed": false,
       "panels": []
@@ -1795,7 +2028,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 58
+        "y": 65
       },
       "targets": [
         {

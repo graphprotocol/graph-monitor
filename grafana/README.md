@@ -82,7 +82,9 @@ predict_linear(gm_account_eth_balance[6h], 4*3600) < 0
 ```
 
 **An oracle has gone quiet.** `activity_seen == 0` means nothing in the lookback at all;
-`idle_seconds` lets you alert earlier at a level you choose.
+`idle_seconds` lets you alert earlier at a level you choose. When activity comes from a subgraph
+source, `idle_seconds` is reported even past the lookback (an oracle quiet for 8 days shows 8
+days), while `activity_seen` stays 0.
 
 ```promql
 gm_account_activity_seen == 0

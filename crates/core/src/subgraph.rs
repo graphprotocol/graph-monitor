@@ -11,6 +11,9 @@
 
 use std::time::Duration;
 
+use std::collections::HashMap;
+
+use alloy::primitives::{Address, B256};
 use alloy::transports::http::reqwest;
 use serde_json::Value;
 
@@ -363,11 +366,22 @@ fn classify(status: u16, reason: String) -> QueryError {
 }
 
 async fn query_meta(http: &reqwest::Client, endpoint: &Endpoint) -> Result<Meta, QueryError> {
+    let body = post(http, endpoint, META_QUERY.to_string()).await?;
+    parse_meta(&body).map_err(|reason| classify(200, reason))
+}
+
+/// POST a GraphQL body and return the response text, or why there is none. A non-2xx answer
+/// is an error carrying the body, since a gateway's error body says more than its status.
+async fn post(
+    http: &reqwest::Client,
+    endpoint: &Endpoint,
+    body: String,
+) -> Result<String, QueryError> {
     let mut request = http
         .post(&endpoint.url)
         .header("content-type", "application/json")
         .timeout(REQUEST_TIMEOUT)
-        .body(META_QUERY);
+        .body(body);
     if let Some(bearer) = &endpoint.bearer {
         request = request.bearer_auth(bearer.expose());
     }
@@ -378,20 +392,168 @@ async fn query_meta(http: &reqwest::Client, endpoint: &Endpoint) -> Result<Meta,
         .await
         .map_err(|e| QueryError::Failed(e.to_string()))?;
     let status = response.status();
-    let body = response
+    let text = response
         .text()
         .await
         .map_err(|e| QueryError::Failed(e.to_string()))?;
-
-    // A gateway error body usually says more than the status code does.
-    match parse_meta(&body) {
-        Ok(meta) => Ok(meta),
-        Err(reason) if status.is_success() => Err(classify(status.as_u16(), reason)),
-        Err(_) => Err(classify(
-            status.as_u16(),
-            format!("HTTP {status}: {}", truncate(&body, 200)),
-        )),
+    if status.is_success() {
+        return Ok(text);
     }
+    // Prefer the GraphQL error message when the body has one.
+    let reason = match graphql_errors(&text) {
+        Some(messages) => messages,
+        None => format!("HTTP {status}: {}", truncate(&text, 200)),
+    };
+    Err(classify(status.as_u16(), reason))
+}
+
+fn graphql_errors(body: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(body).ok()?;
+    let messages: Vec<&str> = value
+        .get("errors")?
+        .as_array()?
+        .iter()
+        .filter_map(|e| e.get("message").and_then(Value::as_str))
+        .collect();
+    (!messages.is_empty()).then(|| messages.join("; "))
+}
+
+// ---------------------------------------------------------------------------------------
+// Activity: when an account last caused an event
+// ---------------------------------------------------------------------------------------
+//
+// A subgraph source may carry generic `Activity` entities, one per (emitter, event, sender),
+// with the id `<emitter>-<topic0>-<sender>` in lowercase hex, plus an "any sender" entity
+// whose sender is the zero address. Nothing here knows which contracts or events a given
+// subgraph indexes: the any-sender entity says whether an event is indexed at all.
+
+/// The `Activity` id for an emitter, event topic and transaction sender.
+pub fn activity_id(emitter: Address, topic0: B256, sender: Address) -> String {
+    format!(
+        "{}-{}-{}",
+        alloy::hex::encode_prefixed(emitter),
+        alloy::hex::encode_prefixed(topic0),
+        alloy::hex::encode_prefixed(sender)
+    )
+}
+
+/// What a subgraph knows about one account's last event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityLookup {
+    /// Last seen in this block, at this time.
+    Last { block: u64, timestamp: u64 },
+    /// The subgraph indexes this event, and this sender has never caused it.
+    Never,
+    /// The subgraph does not index this event (nobody's event is recorded): ask the chain.
+    NotIndexed,
+}
+
+/// Last-seen records fetched from a subgraph, keyed by `Activity` id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActivityIndex {
+    seen: HashMap<String, (u64, u64)>,
+}
+
+impl ActivityIndex {
+    /// Build from (id, (last block, last timestamp)) records, e.g. in tests.
+    pub fn from_records(records: impl IntoIterator<Item = (String, (u64, u64))>) -> Self {
+        Self {
+            seen: records
+                .into_iter()
+                .map(|(id, last)| (id.to_ascii_lowercase(), last))
+                .collect(),
+        }
+    }
+
+    pub fn lookup(&self, emitter: Address, topic0: B256, sender: Address) -> ActivityLookup {
+        if let Some(&(block, timestamp)) = self.seen.get(&activity_id(emitter, topic0, sender)) {
+            return ActivityLookup::Last { block, timestamp };
+        }
+        if self
+            .seen
+            .contains_key(&activity_id(emitter, topic0, Address::ZERO))
+        {
+            ActivityLookup::Never
+        } else {
+            ActivityLookup::NotIndexed
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+}
+
+/// The ids to ask a subgraph for, so `lookup` can answer for every (emitter, event, sender):
+/// each sender's own entity plus the any-sender entity of each event.
+pub fn activity_ids(wanted: &[(Address, B256, Address)]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for &(emitter, topic0, sender) in wanted {
+        for id in [
+            activity_id(emitter, topic0, sender),
+            activity_id(emitter, topic0, Address::ZERO),
+        ] {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids
+}
+
+/// Fetch the given `Activity` entities in one query.
+pub async fn query_activity(
+    http: &reqwest::Client,
+    endpoint: &Endpoint,
+    ids: &[String],
+) -> Result<ActivityIndex, String> {
+    let body = serde_json::json!({
+        "query": "query($ids: [ID!]!) { activities(first: 1000, where: { id_in: $ids }) { id lastBlock lastTimestamp } }",
+        "variables": { "ids": ids },
+    });
+    let text = post(http, endpoint, body.to_string())
+        .await
+        .map_err(|e| match e {
+            QueryError::Auth(r) | QueryError::Failed(r) => r,
+        })?;
+    parse_activities(&text)
+}
+
+/// Parse an `activities` response. BigInt fields arrive as strings.
+fn parse_activities(body: &str) -> Result<ActivityIndex, String> {
+    if let Some(messages) = graphql_errors(body) {
+        return Err(messages);
+    }
+    let value: Value =
+        serde_json::from_str(body).map_err(|e| format!("response is not JSON ({e})"))?;
+    let rows = value
+        .pointer("/data/activities")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "response has no data.activities".to_string())?;
+    let number = |row: &Value, field: &str| -> Result<u64, String> {
+        row.get(field)
+            .and_then(|v| match v {
+                Value::String(s) => s.parse().ok(),
+                other => other.as_u64(),
+            })
+            .ok_or_else(|| format!("activity {field} is missing or not a number"))
+    };
+    let mut seen = HashMap::new();
+    for row in rows {
+        let id = row
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "activity id is missing".to_string())?;
+        seen.insert(
+            id.to_ascii_lowercase(),
+            (number(row, "lastBlock")?, number(row, "lastTimestamp")?),
+        );
+    }
+    Ok(ActivityIndex { seen })
 }
 
 fn truncate(s: &str, max: usize) -> &str {
@@ -583,6 +745,71 @@ mod tests {
         let down = h.into_source_health(crate::source::SourceId::subgraph("monitor"));
         assert!(!down.is_up());
         assert!(down.summary().contains("no key"), "{}", down.summary());
+    }
+
+    #[test]
+    fn activity_ids_are_lowercase_and_include_the_any_sender_entity() {
+        let emitter: Address = "0x1B07D3344188908Fb6DEcEac381f3eE63C48477a"
+            .parse()
+            .unwrap();
+        let topic0 = alloy::primitives::keccak256("TokensPulled(address,uint256)");
+        let wallet: Address = "0x05F9Eea50C6BCd46c07C8EF64566AF9a9Cc91109"
+            .parse()
+            .unwrap();
+        let id = activity_id(emitter, topic0, wallet);
+        assert!(
+            id.starts_with("0x1b07d3344188908fb6deceac381f3ee63c48477a-0x3c3f210f"),
+            "{id}"
+        );
+        assert!(
+            id.ends_with("-0x05f9eea50c6bcd46c07c8ef64566af9a9cc91109"),
+            "{id}"
+        );
+        // Two senders of one event share the any-sender id: three ids, not four.
+        let other: Address = "0x0000000000000000000000000000000000000007"
+            .parse()
+            .unwrap();
+        let ids = activity_ids(&[(emitter, topic0, wallet), (emitter, topic0, other)]);
+        assert_eq!(ids.len(), 3);
+        assert!(ids.contains(&activity_id(emitter, topic0, Address::ZERO)));
+    }
+
+    #[test]
+    fn the_any_sender_entity_tells_never_from_not_indexed() {
+        let emitter = Address::repeat_byte(1);
+        let topic0 = B256::repeat_byte(2);
+        let (seen, quiet) = (Address::repeat_byte(3), Address::repeat_byte(4));
+        let body = format!(
+            r#"{{"data":{{"activities":[
+                {{"id":"{}","lastBlock":"100","lastTimestamp":"1000"}},
+                {{"id":"{}","lastBlock":"120","lastTimestamp":"1200"}}]}}}}"#,
+            activity_id(emitter, topic0, seen),
+            activity_id(emitter, topic0, Address::ZERO)
+        );
+        let index = parse_activities(&body).unwrap();
+        assert_eq!(
+            index.lookup(emitter, topic0, seen),
+            ActivityLookup::Last {
+                block: 100,
+                timestamp: 1000
+            }
+        );
+        // Indexed, and this sender never did it.
+        assert_eq!(index.lookup(emitter, topic0, quiet), ActivityLookup::Never);
+        // Another event entirely: not indexed, so the chain must be asked.
+        assert_eq!(
+            index.lookup(emitter, B256::repeat_byte(9), seen),
+            ActivityLookup::NotIndexed
+        );
+    }
+
+    #[test]
+    fn activity_errors_are_reported_not_read_as_empty() {
+        assert!(parse_activities(
+            r#"{"errors":[{"message":"Type `Query` has no field `activities`"}]}"#
+        )
+        .is_err());
+        assert!(parse_activities(r#"{"data":null}"#).is_err());
     }
 
     #[test]

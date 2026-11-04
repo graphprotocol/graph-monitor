@@ -101,6 +101,9 @@ struct Lane {
     client: Client,
     source: RpcSource,
     checks: Vec<Box<dyn DynWatch>>,
+    /// `Activity` ids to ask this network's subgraph source for: one per event watch that
+    /// matches on the transaction sender, plus each event's any-sender entity.
+    activity_ids: Vec<String>,
 }
 
 /// Everything needed to run cycles against every configured network.
@@ -128,6 +131,19 @@ impl Engine {
                 checks.extend(watches::for_account(&net.name, account, token));
             }
 
+            let wanted: Vec<_> = net
+                .accounts
+                .iter()
+                .filter_map(|a| {
+                    let spec = a.activity.as_ref()?;
+                    (spec.matches == crate::activity::TxMatch::From).then_some((
+                        spec.emitter.address,
+                        spec.topic0,
+                        a.address,
+                    ))
+                })
+                .collect();
+
             lanes.push(Lane {
                 network: net.name.clone(),
                 chain_id: net.chain_id,
@@ -139,6 +155,7 @@ impl Engine {
                 )?,
                 source: RpcSource::new(&net.name, net.chain_id, net.rpc.max_lag),
                 checks,
+                activity_ids: crate::subgraph::activity_ids(&wanted),
             });
         }
 
@@ -224,17 +241,35 @@ impl Engine {
             })
             .collect();
 
-        // Subgraphs need nothing from the watches, so they are checked while the watches read.
-        // Subgraph sources too, for now: no watch reads through one yet.
-        let (lanes, subgraphs, sources) = tokio::join!(
-            futures::future::join_all(
-                self.lanes
+        // Subgraph sources are verified before the watches read, since activity watches read
+        // through them. Only a verified one is used; otherwise those watches search the chain.
+        let sources = self
+            .check_subgraphs(self.subgraph_sources.iter().map(|(_, c)| c), &heads, now)
+            .await;
+        let usable: Vec<(&str, &crate::subgraph::Endpoint)> = self
+            .subgraph_sources
+            .iter()
+            .zip(&sources)
+            .filter(|(_, health)| health.is_up())
+            .filter_map(|((_, check), _)| {
+                check
+                    .endpoint
+                    .as_ref()
+                    .ok()
+                    .map(|e| (check.network.as_str(), e))
+            })
+            .collect();
+
+        // Monitored subgraphs need nothing from the watches, so they are checked meanwhile.
+        let (lanes, subgraphs) = tokio::join!(
+            futures::future::join_all(self.lanes.iter().zip(healths).map(|(lane, health)| {
+                let activity = usable
                     .iter()
-                    .zip(healths)
-                    .map(|(lane, health)| lane.read(health, block)),
-            ),
-            self.check_subgraphs(self.subgraphs.iter(), &heads, now),
-            self.check_subgraphs(self.subgraph_sources.iter().map(|(_, c)| c), &heads, now)
+                    .find(|(network, _)| *network == lane.network)
+                    .map(|(_, endpoint)| *endpoint);
+                lane.read(health, block, activity, &self.http)
+            })),
+            self.check_subgraphs(self.subgraphs.iter(), &heads, now)
         );
         let subgraph_sources = self
             .subgraph_sources
@@ -312,11 +347,14 @@ impl Lane {
         }
     }
 
-    /// Stages 1 and 2 for this network's watches, given its verified (or failed) source.
+    /// Stages 1 and 2 for this network's watches, given its verified (or failed) source and,
+    /// when it has a verified one, its subgraph source for activity.
     async fn read(
         &self,
         mut health: SourceHealth,
         block: BlockSpec,
+        activity: Option<&crate::subgraph::Endpoint>,
+        http: &alloy::transports::http::reqwest::Client,
     ) -> (NetworkReport, Vec<Reading>) {
         // Nothing readable means nothing judgeable. Every check reports Unknown naming the
         // cause, rather than the cycle failing wholesale and reporting nothing at all.
@@ -360,7 +398,21 @@ impl Lane {
             block = pinned.number,
             "prefetching"
         );
-        let ctx = ReadCtx::prefetch(&self.client, pinned, &plan).await;
+        let mut ctx = ReadCtx::prefetch(&self.client, pinned, &plan).await;
+
+        // Last-seen records in one query. A failure here is not a failure of any watch: the
+        // activity watches fall back to searching the chain, as they would without a source.
+        if let (Some(endpoint), false) = (activity, self.activity_ids.is_empty()) {
+            match crate::subgraph::query_activity(http, endpoint, &self.activity_ids).await {
+                Ok(index) => {
+                    tracing::debug!(network = %self.network, records = index.len(), "activity from subgraph");
+                    ctx = ctx.with_activity(index);
+                }
+                Err(reason) => {
+                    tracing::warn!(network = %self.network, %reason, "activity query failed; searching the chain");
+                }
+            }
+        }
 
         // Failures that look like "this endpoint has no state at this block" are a source
         // problem, not N independent cell problems. Reporting them once, attributed to the
