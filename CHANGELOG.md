@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.2](https://github.com/graphprotocol/graph-monitor/compare/v0.1.1...v0.1.2) (2026-11-04)
+
+
+### Features
+
+* add subgtraph monitoring ([773217c](https://github.com/graphprotocol/graph-monitor/commit/773217c46f7ec50010c12fab7c9e136671b9bdca))
+* more subgraph integration ([3311c7b](https://github.com/graphprotocol/graph-monitor/commit/3311c7b01034db59ffe7aa3b3e3380b8550f6a44))
+
 ## [0.1.1](https://github.com/graphprotocol/graph-monitor/compare/v0.1.0...v0.1.1) (2026-10-26)
 
 
