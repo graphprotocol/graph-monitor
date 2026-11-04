@@ -35,8 +35,11 @@ discarded forty digits by then, so comparing the raw gauge against `2^255` gives
 
 ## Alert rules
 
-None ship yet. These are the queries worth starting from — keep them in git next to this file
-rather than defining them in the UI, so a rule and the config it depends on review together.
+[`alerts.yaml`](alerts.yaml) is a ready-to-load rules file built from these queries. It is
+plain Prometheus format, so it works with vmalert, Prometheus or Grafana's rule import. Its
+rules aggregate away scrape-time labels like `pod` so restarts don't duplicate alerts. Below
+are the ideas behind it. Keep rules in git next to this file rather than defining them in the
+UI, so a rule and the config it depends on review together.
 
 **Deadman — the exporter stopped.** `up` catches a dead process; this catches one that is alive
 but wedged, which is the failure that otherwise goes unnoticed.
@@ -54,6 +57,16 @@ gm_read_unknown == 1          # for: 15m
 gm_source_up == 0             # for: 5m
 ```
 
+**A subgraph is down or behind.** A finding about the network, not the tool. Down already
+includes "behind by more than its `max_lag`", so one rule covers both; use
+`gm_subgraph_blocks_behind` for a tighter, per-subgraph line. Alert on `not_checked` separately:
+it means our API key, not the subgraph.
+
+```promql
+gm_subgraph_up == 0           # for: 15m
+gm_subgraph_not_checked == 1  # for: 30m
+```
+
 **Low balances.** Thresholds live here, not in the tool.
 
 ```promql
@@ -69,7 +82,9 @@ predict_linear(gm_account_eth_balance[6h], 4*3600) < 0
 ```
 
 **An oracle has gone quiet.** `activity_seen == 0` means nothing in the lookback at all;
-`idle_seconds` lets you alert earlier at a level you choose.
+`idle_seconds` lets you alert earlier at a level you choose. When activity comes from a subgraph
+source, `idle_seconds` is reported even past the lookback (an oracle quiet for 8 days shows 8
+days), while `activity_seen` stays 0.
 
 ```promql
 gm_account_activity_seen == 0
@@ -110,7 +125,10 @@ histogram_quantile(0.95, sum by (le) (rate(gm_cycle_duration_seconds_bucket[15m]
 | `gm_read_ok` / `gm_read_unknown` | gauge | 1/0 per watch |
 | `gm_read_errors_total` | counter | Failed reads by watch kind |
 | `gm_read_duration_seconds` | histogram | Per watch kind |
-| `gm_source_up` / `_lag_seconds` / `_block_height` | gauge | Stage 0 |
+| `gm_source_up` / `_lag_seconds` / `_block_height` | gauge | Stage 0: the sources the tool reads from. `source` is `rpc:<network>` or `subgraph:<name>`; for a subgraph the height is its latest indexed block |
+| `gm_subgraph_up` | gauge | 1/0 per subgraph check. Absent when not checked |
+| `gm_subgraph_not_checked` | gauge | 1 when our side failed (e.g. API key). Says nothing about the subgraph |
+| `gm_subgraph_block_height` / `_blocks_behind` / `_lag_seconds` | gauge | Latest indexed block, gap to the RPC head (absent when the RPC is down), age against the clock |
 | `gm_block_height` | gauge | Height every value in the cycle was read at |
 | `gm_cycle_last_success_timestamp` | gauge | Deadman |
 | `gm_cycle_duration_seconds` | histogram | |

@@ -315,7 +315,12 @@ impl Watch for ActivityWatch {
             })
             .with(Measurement {
                 name: M_ACTIVITY_SEEN,
-                value: 1.0,
+                // Seen means seen within the lookback. A subgraph can know of activity older
+                // than that: its idle time is still reported, but it does not count as seen.
+                value: match &self.account.activity {
+                    Some(spec) if *idle_seconds > spec.lookback.as_secs() => 0.0,
+                    _ => 1.0,
+                },
                 unit: Unit::Boolean,
                 labels: labels.clone(),
             })
@@ -472,6 +477,39 @@ mod tests {
     }
 
     // ---- observation -------------------------------------------------------------------
+
+    #[test]
+    fn activity_older_than_the_lookback_keeps_its_age_but_is_not_seen() {
+        let event = "OracleVote(bytes32,bool,uint256,uint256)";
+        let mut acc = account();
+        acc.activity = Some(crate::config::ActivitySpec {
+            emitter: crate::config::Spender {
+                display: "SubgraphAvailabilityManager".into(),
+                address: Address::repeat_byte(0xaa),
+            },
+            event: event.into(),
+            topic0: alloy::primitives::keccak256(event.as_bytes()),
+            lookback: std::time::Duration::from_secs(7 * 86_400),
+            matches: crate::activity::TxMatch::From,
+        });
+        let watch = ActivityWatch {
+            network: "arbitrum-one".into(),
+            account: acc,
+        };
+        let recent = watch.observe(&Activity::Last {
+            block: 1,
+            idle_seconds: 86_400,
+        });
+        assert_eq!(recent.value(M_ACTIVITY_SEEN), Some(1.0));
+
+        // A subgraph knows of a vote 8 days ago, past the 7-day lookback.
+        let old = watch.observe(&Activity::Last {
+            block: 1,
+            idle_seconds: 8 * 86_400,
+        });
+        assert_eq!(old.value(M_ACTIVITY_SEEN), Some(0.0));
+        assert_eq!(old.value(M_IDLE_SECONDS), Some(8.0 * 86_400.0));
+    }
 
     #[test]
     fn an_observation_carries_the_value_and_a_sentence() {

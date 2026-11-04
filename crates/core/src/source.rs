@@ -11,6 +11,10 @@ impl SourceId {
         SourceId(format!("rpc:{network}"))
     }
 
+    pub fn subgraph(name: &str) -> Self {
+        SourceId(format!("subgraph:{name}"))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -33,6 +37,11 @@ pub enum SourceFault {
     Stale { lag: Duration, max_lag: Duration },
     /// Live, but cannot serve *state* at the requested block.
     StateUnavailable { block: u64, reason: String },
+    /// A subgraph source answered badly: wrong deployment, indexing errors, stale, or no
+    /// usable answer at all.
+    Subgraph(crate::subgraph::SubgraphFault),
+    /// A subgraph source could not be queried from our side, e.g. no API key.
+    NotQueryable(String),
 }
 
 impl SourceFault {
@@ -51,6 +60,8 @@ impl SourceFault {
                 "state at block {block} is not available from this endpoint — reading a \
                  historical block usually needs an archive node ({reason})"
             ),
+            SourceFault::Subgraph(fault) => fault.summary(),
+            SourceFault::NotQueryable(reason) => format!("cannot be queried: {reason}"),
         }
     }
 }
@@ -67,6 +78,18 @@ pub struct SourceHealth {
 }
 
 impl SourceHealth {
+    /// Nothing known yet.
+    pub fn new(id: SourceId, network: &str) -> Self {
+        Self {
+            id,
+            network: network.to_string(),
+            chain_id: None,
+            head: None,
+            lag: None,
+            fault: None,
+        }
+    }
+
     pub fn is_up(&self) -> bool {
         self.fault.is_none()
     }
@@ -104,14 +127,7 @@ impl RpcSource {
 
     /// Reachable, the right chain, and current.
     pub async fn verify(&self, client: &Client, now_unix: u64) -> SourceHealth {
-        let mut health = SourceHealth {
-            id: self.id.clone(),
-            network: self.network.clone(),
-            chain_id: None,
-            head: None,
-            lag: None,
-            fault: None,
-        };
+        let mut health = SourceHealth::new(self.id.clone(), &self.network);
 
         let actual = match client.chain_id().await {
             Ok(id) => id,
@@ -155,6 +171,19 @@ impl RpcSource {
     }
 }
 
+/// Chain ids of networks the tool knows by name, so config need not repeat them. The id is
+/// what every RPC is checked against: a URL cannot be trusted to say which chain it serves.
+pub fn known_chain_id(network: &str) -> Option<u64> {
+    match network {
+        "mainnet" => Some(1),
+        "sepolia" => Some(11_155_111),
+        "arbitrum-one" => Some(42161),
+        "arbitrum-sepolia" => Some(421_614),
+        "gnosis" => Some(100),
+        _ => None,
+    }
+}
+
 /// Default freshness allowance, chosen roughly an order of magnitude above block time so
 /// ordinary jitter never trips it.
 pub fn default_max_lag(chain_id: u64) -> Duration {
@@ -172,8 +201,6 @@ mod tests {
 
     fn health_with(lag: Option<Duration>, fault: Option<SourceFault>) -> SourceHealth {
         SourceHealth {
-            id: SourceId::rpc("arbitrum-one"),
-            network: "arbitrum-one".into(),
             chain_id: Some(42161),
             head: Some(PinnedBlock {
                 number: 100,
@@ -181,6 +208,7 @@ mod tests {
             }),
             lag,
             fault,
+            ..SourceHealth::new(SourceId::rpc("arbitrum-one"), "arbitrum-one")
         }
     }
 
@@ -213,6 +241,13 @@ mod tests {
         };
         assert!(mismatch.summary().contains("42161"));
         assert!(mismatch.summary().contains('1'));
+    }
+
+    #[test]
+    fn well_known_networks_need_no_chain_id() {
+        assert_eq!(known_chain_id("arbitrum-one"), Some(42161));
+        assert_eq!(known_chain_id("gnosis"), Some(100));
+        assert_eq!(known_chain_id("my-devnet"), None);
     }
 
     #[test]

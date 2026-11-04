@@ -1,0 +1,19 @@
+# TEST ONLY: delete this rule after the end-to-end check, and do not commit this file.
+#
+# A copy of GraphMonitorBalanceBelowFloor with an impossible floor, so it fires on the
+# first evaluation. Use it to check the path Grafana -> Rootly -> Protocol and Network
+# on-call. Deleting the rule in Grafana resolves the alert in Rootly.
+groups:
+  - name: graph-monitor.test
+    rules:
+      - alert: GraphMonitorBalanceBelowFloorTest
+        expr: |
+          min by (network, group, account) (gm_account_eth_balance{account="NetworkMonitor"}) < 1000000
+        for: 1m
+        labels:
+          team: Protocol and Network
+          priority: P3
+        annotations:
+          summary: "[TEST] {{ $labels.account }} balance is below its floor ({{ $value | humanize }})"
+          description: Test alert for the graph-monitor rollout. Floor set to 1,000,000 ETH on purpose, so ignore it. It resolves when the rule is deleted.
+          dashboard: /d/graph-monitor

@@ -129,9 +129,19 @@ Per source, stage 0 asserts:
 | Source | Assertions |
 |---|---|
 | RPC | reachable; `eth_chainId` matches config; head block advancing; head timestamp within `max_lag` of wall clock |
-| Subgraph *(later)* | reachable; correct deployment; `_meta.block` within `max_lag_blocks` of the chain head |
+| Subgraph | reachable; correct deployment (when pinned); no indexing errors; `_meta.block` timestamp within `max_lag` of wall clock |
 
-Implemented in `crates/core/src/source.rs`. A fourth fault, `StateUnavailable`, was added
+Implemented in `crates/core/src/source.rs`; subgraph sources are configured under
+`[sources.subgraph.<network>]` and verified with the same check as monitored subgraphs, read as a
+source verdict (a subgraph that cannot be queried at all counts as down). Sources are verified
+before the watches read. A verified subgraph source answers activity watches from its generic
+`Activity` entities; when it is down, or does not index an event, those watches fall back to the
+RPC log search, so a subgraph outage costs speed and reach, never correctness. Subgraphs that are merely
+*monitored* (network, analytics, EBO, QoS) are components, not sources: they are checked in
+`crates/core/src/subgraph.rs` and reported beside balances, and a failure there is a finding about
+the network rather than a blind spot in the tool. Both roles share the same `_meta` query and
+verdict. Lag is judged in time rather than blocks: a time limit means the same thing on every
+chain, and a block limit would have to be retuned per chain's block rate. A fourth fault, `StateUnavailable`, was added
 during implementation: a non-archive endpoint serves headers happily and then refuses every
 balance read at a historical block. Those failures are classified by error text and promoted to
 a single source fault, rather than scattering as unrelated unreadable cells.
@@ -483,10 +493,9 @@ becomes `account status` / `account balances` / `account allowances`.
 against the head block's timestamp:
 
 ```toml
-[networks.arbitrum-one]
-chain_id = 42161
-rpc_url  = "https://arb1.arbitrum.io/rpc"
-max_lag  = "60s"           # head timestamp must be within this of wall clock
+[sources.rpc.arbitrum-one]
+url     = "https://arb1.arbitrum.io/rpc"
+max_lag = "60s"            # head timestamp must be within this of wall clock
 ```
 
 Defaults, chosen as roughly an order of magnitude above normal block time so ordinary jitter
@@ -498,8 +507,8 @@ never trips them:
 | Ethereum mainnet | ~12s | `120s` |
 | Anything else | — | `120s` |
 
-Subgraph sources get `max_lag_blocks` instead when they arrive, because a subgraph's lag is
-naturally measured against the chain head rather than the clock.
+Subgraphs use a time-based `max_lag` too (default 15 minutes), for the same reason: it means the
+same thing on every chain. Blocks behind the RPC head is exported, not judged.
 
 **8. Grafana owns thresholds and alerting. The tool reports facts and repairs.**
 

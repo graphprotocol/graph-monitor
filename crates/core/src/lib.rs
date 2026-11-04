@@ -13,6 +13,7 @@ pub mod read;
 pub mod remediate;
 pub mod rpc;
 pub mod source;
+pub mod subgraph;
 pub mod units;
 pub mod watch;
 pub mod watches;
