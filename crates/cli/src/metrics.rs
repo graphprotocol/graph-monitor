@@ -36,6 +36,7 @@ const ALLOWANCE_LABELS: &[&str] = &["network", "group", "owner", "spender"];
 const WATCH_LABELS: &[&str] = &["network", "group", "account", "watch"];
 /// `deployment` is empty for the published version, and the `Qm…` id for a listed deployment.
 const SUBGRAPH_LABELS: &[&str] = &["network", "subgraph", "deployment"];
+const SUBGRAPH_LABELS_KIND: &[&str] = &["network", "subgraph", "deployment", "kind"];
 
 pub struct Metrics {
     // Observed state.
@@ -60,6 +61,7 @@ pub struct Metrics {
     pub source_up: IntGaugeVec,
     pub source_lag_seconds: GaugeVec,
     pub source_block_height: IntGaugeVec,
+    pub source_fault: IntGaugeVec,
 
     // Subgraphs, as monitored components of the network. Not sources: see `subgraph.rs`.
     pub subgraph_up: IntGaugeVec,
@@ -67,6 +69,7 @@ pub struct Metrics {
     pub subgraph_block_height: IntGaugeVec,
     pub subgraph_blocks_behind: IntGaugeVec,
     pub subgraph_lag_seconds: GaugeVec,
+    pub subgraph_fault: IntGaugeVec,
 
     // Remediation.
     pub remediation_threshold: GaugeVec,
@@ -194,6 +197,22 @@ impl Metrics {
                 &["network", "source"]
             )
             .unwrap(),
+            source_fault: register_int_gauge_vec!(
+                "gm_source_fault",
+                "1 for the kind of fault that has a source down: unreachable, chain_id_mismatch, \
+                 stale, state_unavailable, wrong_deployment, indexing_errors, not_configured or \
+                 key_rejected. Absent while the source is up",
+                &["network", "source", "kind"]
+            )
+            .unwrap(),
+            subgraph_fault: register_int_gauge_vec!(
+                "gm_subgraph_fault",
+                "1 for the kind of fault a subgraph check found: unreachable, wrong_deployment, \
+                 indexing_errors or stale (down), not_configured or key_rejected (not checked). \
+                 Absent while the subgraph is up",
+                SUBGRAPH_LABELS_KIND
+            )
+            .unwrap(),
             subgraph_up: register_int_gauge_vec!(
                 "gm_subgraph_up",
                 "1 when the subgraph answered, from the expected deployment, without indexing \
@@ -291,6 +310,7 @@ impl Metrics {
         self.source_up.reset();
         self.source_lag_seconds.reset();
         self.source_block_height.reset();
+        self.source_fault.reset();
         self.block_height.reset();
 
         let sources = report
@@ -304,6 +324,11 @@ impl Metrics {
             self.source_up
                 .with_label_values(&labels)
                 .set(i64::from(source.is_up()));
+            if let Some(fault) = &source.fault {
+                self.source_fault
+                    .with_label_values(&[labels[0], labels[1], fault.kind()])
+                    .set(1);
+            }
             if let Some(lag) = source.lag {
                 self.source_lag_seconds
                     .with_label_values(&labels)
@@ -323,6 +348,7 @@ impl Metrics {
         self.subgraph_block_height.reset();
         self.subgraph_blocks_behind.reset();
         self.subgraph_lag_seconds.reset();
+        self.subgraph_fault.reset();
         for sg in &report.subgraphs {
             // The chain the subgraph indexes, which need not be the one this process reads.
             let labels = [
@@ -333,6 +359,11 @@ impl Metrics {
             self.subgraph_not_checked
                 .with_label_values(&labels)
                 .set(i64::from(sg.is_not_checked()));
+            if let Some(kind) = sg.fault_kind() {
+                self.subgraph_fault
+                    .with_label_values(&[labels[0], labels[1], labels[2], kind])
+                    .set(1);
+            }
             // Not checked publishes no verdict: a missing key must not read as a down subgraph.
             if sg.is_not_checked() {
                 continue;

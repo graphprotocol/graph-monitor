@@ -1,7 +1,16 @@
 # Grafana
 
-`graph-monitor-dashboard.json` — import via **Dashboards → New → Import → Upload JSON**, then
-pick your Prometheus data source.
+`graph-monitor-dashboard.json` is the dashboard in Grafana's **v2 schema**
+(`dashboard.grafana.app/v2`), the format recent Grafana shows in its JSON editor. The file is the
+source of truth:
+
+- **Apply it:** open the dashboard, **Edit → Settings → JSON Model**, replace the contents with
+  the file, save. For a first install, **Dashboards → New → Import** works too.
+- **Bring UI edits back:** copy the JSON Model into the file. Keep `metadata` down to
+  `name: graph-monitor`: the rest (namespace, uid, resourceVersion, who saved it and when) describes
+  one Grafana instance, not the dashboard.
+
+Pick your Prometheus data source in the **Data source** dropdown at the top.
 
 Feed it with:
 
@@ -126,8 +135,10 @@ histogram_quantile(0.95, sum by (le) (rate(gm_cycle_duration_seconds_bucket[15m]
 | `gm_read_errors_total` | counter | Failed reads by watch kind |
 | `gm_read_duration_seconds` | histogram | Per watch kind |
 | `gm_source_up` / `_lag_seconds` / `_block_height` | gauge | Stage 0: the sources the tool reads from. `source` is `rpc:<network>` or `subgraph:<name>`; for a subgraph the height is its latest indexed block |
+| `gm_source_fault` | gauge | 1 for the `kind` of fault while a source is down: `unreachable`, `chain_id_mismatch`, `stale`, `state_unavailable`, `wrong_deployment`, `indexing_errors`, `not_configured`, `key_rejected` |
 | `gm_subgraph_up` | gauge | 1/0 per subgraph check. Absent when not checked |
 | `gm_subgraph_not_checked` | gauge | 1 when our side failed (e.g. API key). Says nothing about the subgraph |
+| `gm_subgraph_fault` | gauge | 1 for the `kind` of fault: `unreachable`, `stale`, `wrong_deployment`, `indexing_errors` (down), `not_configured`, `key_rejected` (not checked) |
 | `gm_subgraph_block_height` / `_blocks_behind` / `_lag_seconds` | gauge | Latest indexed block, gap to the RPC head (absent when the RPC is down), age against the clock |
 | `gm_block_height` | gauge | Height every value in the cycle was read at |
 | `gm_cycle_last_success_timestamp` | gauge | Deadman |

@@ -429,7 +429,7 @@ fn subgraph_table(subgraphs: &[SubgraphHealth]) -> String {
             // For the published version, which deployment that currently is.
             SubgraphStatus::Up => style::dim(sg.served_deployment.as_deref().unwrap_or_default()),
             SubgraphStatus::Down(fault) => style::alarm(&fault.summary()),
-            SubgraphStatus::NotChecked(reason) => style::action(reason),
+            SubgraphStatus::NotChecked(why) => style::action(&why.to_string()),
         };
         // A deployment row is on its parent's chain; saying it again is noise.
         let chain = if sg.deployment.is_some() {
@@ -548,15 +548,56 @@ pub fn flat(report: &CycleReport, unreadable_only: bool) -> String {
     out
 }
 
-/// Why each unreadable watch failed, for stderr.
+/// Something wrong in a cycle, worded for a person.
 ///
-/// A count alone sends the reader off to rerun with `--flat`. Watches failing for the same
-/// reason share a line, so a provider limit hitting five accounts reads as one problem.
-pub fn unreadable_notes(report: &CycleReport) -> Vec<String> {
-    // (network, kind, reason) -> the watches that failed that way.
+/// One list serves both commands: `status` prints every finding as a note, `serve` logs one
+/// when it appears or changes and again when it clears. `key` is stable while the same thing
+/// is wrong, so a long outage is one log line, not one per cycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finding {
+    pub key: String,
+    pub message: String,
+    /// What to say once it is no longer found.
+    pub cleared: String,
+}
+
+pub fn findings(report: &CycleReport) -> Vec<Finding> {
+    let mut out = Vec::new();
+
+    for net in report.networks.iter().filter(|n| !n.source.is_up()) {
+        let effect = if net.watches > 0 {
+            format!("every {} watch reports unreadable", net.network)
+        } else {
+            format!("{} subgraphs have no block gap", net.network)
+        };
+        out.push(Finding {
+            key: format!("source:{}", net.source.id),
+            message: format!(
+                "source {} is unavailable ({}); {effect}",
+                net.source.id,
+                net.source.summary()
+            ),
+            cleared: format!("source {} is up again", net.source.id),
+        });
+    }
+
+    for src in report.subgraph_sources.iter().filter(|s| !s.is_up()) {
+        out.push(Finding {
+            key: format!("source:{}", src.id),
+            message: format!(
+                "source {} is unavailable ({}); activity watches on {} search the chain instead",
+                src.id,
+                src.summary(),
+                src.network
+            ),
+            cleared: format!("source {} is up again", src.id),
+        });
+    }
+
+    // Watches on a dead source are covered by its finding; these failed on their own.
+    // Grouped by reason, so a provider limit hitting five accounts reads as one problem.
     type Reason<'a> = (&'a str, &'a str, &'a str);
     let mut by_reason: Vec<(Reason, Vec<&str>)> = Vec::new();
-    // Watches on a dead source share one reason, which the source note already gives.
     let source_up = |network: &str| report.network(network).is_some_and(|n| n.source.is_up());
     for reading in report.unreadable().filter(|r| source_up(&r.labels.network)) {
         let key = (
@@ -570,12 +611,73 @@ pub fn unreadable_notes(report: &CycleReport) -> Vec<String> {
             None => by_reason.push((key, vec![instance])),
         }
     }
-    by_reason
-        .into_iter()
-        .map(|((network, kind, reason), instances)| {
-            format!("{network} {kind} {}: {reason}", instances.join(", "))
-        })
-        .collect()
+    for ((network, kind, reason), instances) in by_reason {
+        let who = instances.join(", ");
+        out.push(Finding {
+            key: format!("unreadable:{network}:{kind}:{who}"),
+            message: format!("{network} {kind} {who} could not be read: {reason}"),
+            cleared: format!("{network} {kind} {who} can be read again"),
+        });
+    }
+
+    for sg in &report.subgraphs {
+        let message = match &sg.status {
+            SubgraphStatus::Up => continue,
+            SubgraphStatus::Down(fault) => format!(
+                "subgraph {} on {} is down: {}",
+                sg.name(),
+                sg.network,
+                fault.summary()
+            ),
+            SubgraphStatus::NotChecked(why) => format!(
+                "subgraph {} on {} was not checked: {why}",
+                sg.name(),
+                sg.network
+            ),
+        };
+        out.push(Finding {
+            // Shared by down and not checked, so a change between them is a changed finding.
+            key: format!("subgraph:{}:{}", sg.network, sg.name()),
+            message,
+            cleared: format!("subgraph {} on {} is up again", sg.name(), sg.network),
+        });
+    }
+
+    out
+}
+
+/// Logs findings as they change, for a long-running process.
+#[derive(Default)]
+pub struct FindingLog {
+    open: std::collections::BTreeMap<String, Finding>,
+}
+
+/// What a cycle's findings changed, in the order to report it.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Change {
+    /// New, or the same problem with a different message.
+    Raised(String),
+    Cleared(String),
+}
+
+impl FindingLog {
+    pub fn update(&mut self, current: Vec<Finding>) -> Vec<Change> {
+        let mut changes = Vec::new();
+        let mut next = std::collections::BTreeMap::new();
+        for finding in current {
+            if self.open.get(&finding.key).map(|f| &f.message) != Some(&finding.message) {
+                changes.push(Change::Raised(finding.message.clone()));
+            }
+            next.insert(finding.key.clone(), finding);
+        }
+        for (key, finding) in &self.open {
+            if !next.contains_key(key) {
+                changes.push(Change::Cleared(finding.cleared.clone()));
+            }
+        }
+        self.open = next;
+        changes
+    }
 }
 
 pub fn summary_line(report: &CycleReport) -> String {
@@ -688,7 +790,7 @@ mod tests {
     use graph_monitor_core::engine::NetworkReport;
     use graph_monitor_core::rpc::PinnedBlock;
     use graph_monitor_core::source::{SourceHealth, SourceId};
-    use graph_monitor_core::subgraph::SubgraphFault;
+    use graph_monitor_core::subgraph::{NotChecked, SubgraphFault};
     use graph_monitor_core::units::Amount;
     use graph_monitor_core::watch::{Asset, Labels, Observation, RemediationIntent, Unit, WatchId};
     use std::time::Duration;
@@ -799,7 +901,9 @@ mod tests {
                 "qos",
                 None,
                 None,
-                SubgraphStatus::NotChecked("no gateway.api_key configured".into()),
+                SubgraphStatus::NotChecked(NotChecked::NotConfigured(
+                    "no gateway.api_key configured".into(),
+                )),
             ),
             // Another chain: answered, but the gap to our RPC's head is not measurable.
             SubgraphHealth {
@@ -878,26 +982,106 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_notes_say_why_and_group_shared_reasons() {
+    fn unreadable_findings_say_why_and_group_shared_reasons() {
         let mut a = unreadable("activity", "SamOracleGraphOps");
         a.observation = Err("searched 600000 blocks without reaching the lookback".into());
         let mut b = unreadable("activity", "SamOracleSemiotic");
         b.observation = a.observation.clone();
         let c = unreadable("eth_balance", "BillingWallet");
-        let notes = unreadable_notes(&report(vec![
+        let messages: Vec<String> = findings(&report(vec![
             a,
             outcome("eth_balance", "Fine", None, None),
             b,
             c,
-        ]));
+        ]))
+        .into_iter()
+        .map(|f| f.message)
+        .collect();
         assert_eq!(
-            notes,
+            messages,
             [
-                "arbitrum-one activity SamOracleGraphOps, SamOracleSemiotic: searched 600000 \
-                 blocks without reaching the lookback",
-                "arbitrum-one eth_balance BillingWallet: endpoint refused historical state",
+                "arbitrum-one activity SamOracleGraphOps, SamOracleSemiotic could not be read: \
+                 searched 600000 blocks without reaching the lookback",
+                "arbitrum-one eth_balance BillingWallet could not be read: endpoint refused \
+                 historical state",
             ]
         );
+    }
+
+    #[test]
+    fn every_kind_of_problem_is_a_finding() {
+        let mut r = report(vec![]);
+        r.subgraph_sources = vec![SourceHealth {
+            fault: Some(graph_monitor_core::source::SourceFault::NotQueryable(
+                NotChecked::KeyRejected("auth error: API key not found".into()),
+            )),
+            ..SourceHealth::new(SourceId::subgraph("graph-monitor"), "arbitrum-one")
+        }];
+        r.subgraphs = vec![
+            subgraph(
+                "ebo",
+                None,
+                None,
+                SubgraphStatus::Down(SubgraphFault::IndexingErrors),
+            ),
+            subgraph(
+                "qos",
+                None,
+                None,
+                SubgraphStatus::NotChecked(NotChecked::NotConfigured(
+                    "no gateway.api_key configured".into(),
+                )),
+            ),
+        ];
+        let messages: Vec<String> = findings(&r).into_iter().map(|f| f.message).collect();
+        assert_eq!(messages.len(), 3, "{messages:?}");
+        assert!(
+            messages[0].contains("subgraph:graph-monitor is unavailable"),
+            "{}",
+            messages[0]
+        );
+        assert!(
+            messages[0].contains("refused our API key"),
+            "{}",
+            messages[0]
+        );
+        assert!(
+            messages[1].contains("ebo on arbitrum-one is down"),
+            "{}",
+            messages[1]
+        );
+        assert!(
+            messages[2].contains("qos on arbitrum-one was not checked"),
+            "{}",
+            messages[2]
+        );
+    }
+
+    #[test]
+    fn the_log_reports_changes_not_every_cycle() {
+        let f = |key: &str, message: &str| Finding {
+            key: key.into(),
+            message: message.into(),
+            cleared: format!("{key} is fine again"),
+        };
+        let mut log = FindingLog::default();
+        assert_eq!(
+            log.update(vec![f("a", "a is down")]),
+            [Change::Raised("a is down".into())]
+        );
+        // Same problem, same words: nothing to say.
+        assert!(log.update(vec![f("a", "a is down")]).is_empty());
+        // Same problem, new words: say it again.
+        assert_eq!(
+            log.update(vec![f("a", "a is stale")]),
+            [Change::Raised("a is stale".into())]
+        );
+        // Gone: say it cleared, once.
+        assert_eq!(
+            log.update(vec![]),
+            [Change::Cleared("a is fine again".into())]
+        );
+        assert!(log.update(vec![]).is_empty());
     }
 
     #[test]
