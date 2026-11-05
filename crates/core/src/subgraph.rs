@@ -120,6 +120,16 @@ pub enum SubgraphFault {
 }
 
 impl SubgraphFault {
+    /// A fixed name for the kind of fault, for metrics and alert labels.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            SubgraphFault::Unreachable(_) => "unreachable",
+            SubgraphFault::WrongDeployment { .. } => "wrong_deployment",
+            SubgraphFault::IndexingErrors => "indexing_errors",
+            SubgraphFault::Stale { .. } => "stale",
+        }
+    }
+
     pub fn summary(&self) -> String {
         match self {
             SubgraphFault::Unreachable(e) => format!("no answer: {e}"),
@@ -143,7 +153,37 @@ pub enum SubgraphStatus {
     Down(SubgraphFault),
     /// Our side failed before the subgraph could be judged: no API key, or the gateway
     /// refused ours. Says nothing about the subgraph, so it must not read as "down".
-    NotChecked(String),
+    NotChecked(NotChecked),
+}
+
+/// Why a subgraph could not be checked. Both are problems on our side, with different fixes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotChecked {
+    /// No usable endpoint: no API key configured, or an unset `${VAR}` in its URL.
+    NotConfigured(String),
+    /// The gateway refused the API key we sent.
+    KeyRejected(String),
+}
+
+impl NotChecked {
+    /// A fixed name for the kind of fault, for metrics and alert labels.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            NotChecked::NotConfigured(_) => "not_configured",
+            NotChecked::KeyRejected(_) => "key_rejected",
+        }
+    }
+}
+
+impl std::fmt::Display for NotChecked {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NotChecked::NotConfigured(reason) => f.write_str(reason),
+            NotChecked::KeyRejected(reason) => {
+                write!(f, "the gateway refused our API key ({reason})")
+            }
+        }
+    }
 }
 
 /// One check: a subgraph's published version, or one listed deployment of it.
@@ -193,6 +233,15 @@ impl SubgraphHealth {
 
     pub fn is_not_checked(&self) -> bool {
         matches!(self.status, SubgraphStatus::NotChecked(_))
+    }
+
+    /// The kind of fault, when there is one.
+    pub fn fault_kind(&self) -> Option<&'static str> {
+        match &self.status {
+            SubgraphStatus::Up => None,
+            SubgraphStatus::Down(fault) => Some(fault.kind()),
+            SubgraphStatus::NotChecked(why) => Some(why.kind()),
+        }
     }
 
     /// `network` for the published version, `network@Qm…` for a listed deployment.
@@ -268,7 +317,8 @@ impl SubgraphCheck {
         let endpoint = match &self.endpoint {
             Ok(endpoint) => endpoint,
             Err(reason) => {
-                health.status = SubgraphStatus::NotChecked(reason.clone());
+                health.status =
+                    SubgraphStatus::NotChecked(NotChecked::NotConfigured(reason.clone()));
                 return health;
             }
         };
@@ -276,9 +326,7 @@ impl SubgraphCheck {
         let meta = match query_meta(http, endpoint).await {
             Ok(meta) => meta,
             Err(QueryError::Auth(reason)) => {
-                health.status = SubgraphStatus::NotChecked(format!(
-                    "the gateway refused our API key ({reason})"
-                ));
+                health.status = SubgraphStatus::NotChecked(NotChecked::KeyRejected(reason));
                 return health;
             }
             Err(QueryError::Failed(reason)) => {
@@ -741,7 +789,7 @@ mod tests {
         assert_eq!(up.head.map(|b| (b.number, b.timestamp)), Some((990, 1_000)));
         assert_eq!(up.id.as_str(), "subgraph:monitor");
 
-        h.status = SubgraphStatus::NotChecked("no key".into());
+        h.status = SubgraphStatus::NotChecked(NotChecked::NotConfigured("no key".into()));
         let down = h.into_source_health(crate::source::SourceId::subgraph("monitor"));
         assert!(!down.is_up());
         assert!(down.summary().contains("no key"), "{}", down.summary());

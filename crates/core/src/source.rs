@@ -41,10 +41,23 @@ pub enum SourceFault {
     /// usable answer at all.
     Subgraph(crate::subgraph::SubgraphFault),
     /// A subgraph source could not be queried from our side, e.g. no API key.
-    NotQueryable(String),
+    NotQueryable(crate::subgraph::NotChecked),
 }
 
 impl SourceFault {
+    /// A fixed name for the kind of fault, for metrics and alert labels. A small closed set,
+    /// unlike `summary`, so it can be a label without multiplying series.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            SourceFault::Unreachable(_) => "unreachable",
+            SourceFault::ChainIdMismatch { .. } => "chain_id_mismatch",
+            SourceFault::Stale { .. } => "stale",
+            SourceFault::StateUnavailable { .. } => "state_unavailable",
+            SourceFault::Subgraph(fault) => fault.kind(),
+            SourceFault::NotQueryable(why) => why.kind(),
+        }
+    }
+
     pub fn summary(&self) -> String {
         match self {
             SourceFault::Unreachable(e) => format!("endpoint unreachable: {e}"),

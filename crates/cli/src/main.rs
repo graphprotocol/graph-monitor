@@ -26,7 +26,8 @@ const EXIT_SOURCE: u8 = 3;
 fn main() -> ExitCode {
     let args = Cli::parse();
     style::init(args.global.color);
-    init_tracing(args.global.verbose);
+    let service = matches!(args.command, Command::Serve { .. });
+    init_tracing(args.global.verbose, service);
 
     match run(args) {
         Ok(code) => code,
@@ -39,10 +40,13 @@ fn main() -> ExitCode {
 }
 
 /// Logs go to stderr, never stdout. `RUST_LOG` wins if set.
-fn init_tracing(verbosity: u8) {
-    let default = match verbosity {
-        0 => "warn",
-        1 => "info",
+///
+/// A one-off command logs warnings only: its report is the output. A long-running `serve` logs
+/// at info with timestamps, because its log is the only record of what it did and when.
+fn init_tracing(verbosity: u8, service: bool) {
+    let default = match (verbosity, service) {
+        (0, false) => "warn",
+        (0, true) | (1, _) => "info",
         _ => "debug",
     };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
@@ -51,12 +55,17 @@ fn init_tracing(verbosity: u8) {
         ))
     });
 
-    tracing_subscriber::fmt()
+    // Colour only on a terminal: in a container's log, escape codes are noise.
+    let fmt = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
-        .without_time()
-        .with_target(false)
-        .init();
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
+        .with_target(false);
+    if service {
+        fmt.init();
+    } else {
+        fmt.without_time().init();
+    }
 }
 
 /// A core error carries its own exit code; anything else is a usage problem.
@@ -158,51 +167,10 @@ async fn run(args: Cli) -> Result<ExitCode> {
         print!("{}", render::grouped(&report));
     }
 
-    // Caveats go to stderr: they qualify the readout without polluting it.
-    for net in &report.networks {
-        if net.source.is_up() {
-            continue;
-        }
-        if net.watches > 0 {
-            eprintln!(
-                "note: source {} is unavailable ({}); every {} watch reports unreadable",
-                net.source.id,
-                net.source.summary(),
-                net.network
-            );
-        } else {
-            eprintln!(
-                "note: source {} is unavailable ({}); {} subgraphs have no block gap this run",
-                net.source.id,
-                net.source.summary(),
-                net.network
-            );
-        }
-    }
-    for src in report.subgraph_sources.iter().filter(|s| !s.is_up()) {
-        eprintln!("note: source {} is unavailable ({})", src.id, src.summary());
-    }
-    // Watches on a dead source are already explained above; list only the ones that failed
-    // on their own.
-    let unreadable = report
-        .unreadable()
-        .filter(|r| {
-            report
-                .network(&r.labels.network)
-                .is_some_and(|n| n.source.is_up())
-        })
-        .count();
-    if unreadable > 0 {
-        eprintln!("note: {unreadable} watch(es) could not be read:");
-        for line in render::unreadable_notes(&report) {
-            eprintln!("  {line}");
-        }
-    }
-    for sg in report.subgraphs_down() {
-        eprintln!("note: subgraph {} is down: {}", sg.name(), sg.summary());
-    }
-    for sg in report.subgraphs_not_checked() {
-        eprintln!("note: subgraph {} was {}", sg.name(), sg.summary());
+    // Caveats go to stderr: they qualify the readout without polluting it. The same findings
+    // `serve` logs as they change.
+    for finding in render::findings(&report) {
+        eprintln!("note: {}", finding.message);
     }
 
     for repair in &repairs {
@@ -500,6 +468,7 @@ async fn serve(
         }
     });
 
+    let mut findings = render::FindingLog::default();
     let mut ticker = interval(Duration::from_secs(interval_secs.max(1)));
     // A cycle that overruns its interval skips the missed tick rather than queueing a backlog
     // it can never work off.
@@ -530,13 +499,27 @@ async fn serve(
 
         for (network, exec) in &executors {
             let repairs = exec.run(&readings_on(&report, network)).await;
+            for repair in &repairs {
+                tracing::warn!(
+                    network = %network,
+                    "remediation: {} — {}",
+                    repair.account,
+                    repair.outcome.describe()
+                );
+            }
             m.publish_remediations(network, &repairs);
         }
 
-        let (read, unreadable) = report.counts();
-        for net in report.blind_networks() {
-            tracing::warn!(source = %net.source.id, reason = %net.source.summary(), "network read nothing");
+        // The same findings `status` prints, logged when they appear, change or clear, so a
+        // long outage is one line and its end is visible too.
+        for change in findings.update(render::findings(&report)) {
+            match change {
+                render::Change::Raised(message) => tracing::warn!("{message}"),
+                render::Change::Cleared(message) => tracing::info!("{message}"),
+            }
         }
+
+        let (read, unreadable) = report.counts();
         if report.read_anything() {
             // Only a cycle that actually read something counts as success. Otherwise the
             // deadman is satisfied by a process failing briskly every two minutes.
