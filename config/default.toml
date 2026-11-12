@@ -12,11 +12,7 @@
 
 [sources.rpc.arbitrum-one]
 url = "https://arb1.arbitrum.io/rpc"
-# How far behind wall clock the head block may be before the source is called stale.
 max_lag = "60s"
-# Requests in flight. Low for the free public endpoint above, which returns 429 well before a
-# paid provider would. Activity watches search logs and are latency-bound, so raising this
-# against a real endpoint speeds them up almost linearly.
 max_concurrency = 6
 
 [sources.rpc.gnosis]
@@ -24,8 +20,6 @@ url = "https://rpc.gnosischain.com"
 max_lag = "60s"
 max_concurrency = 6
 
-# Answers every activity watch on arbitrum-one from its generic Activity entities, in one
-# query per cycle. Down, or not indexing an event, those watches search the chain instead.
 [sources.subgraph.arbitrum-one]
 label = "graph-monitor"
 id    = "9DR6unCi6gxi5CfJDszZygF4uA4j2qyTCxsJttw1CwdK"
@@ -72,7 +66,7 @@ L2Curation                  = "0x22d78fb4bc72e191C765807f8891B5e1785C8014"
 [[accounts.arbitrum-one]]
 address = "FoundationBillingMultisig"
 group   = "billing"
-watch   = ["grt"]
+checks  = ["grt"]
 
   [[accounts.arbitrum-one.allowances]]
   spender = "NetworkMonitor"
@@ -81,7 +75,7 @@ watch   = ["grt"]
 [[accounts.arbitrum-one]]
 address = "BillingWallet"
 group   = "billing"
-watch   = ["eth", "grt"]
+checks  = ["eth", "grt"]
 
   [accounts.arbitrum-one.activity]
   emitter = "BillingContract"
@@ -94,7 +88,7 @@ watch   = ["eth", "grt"]
 [[accounts.arbitrum-one]]
 address = "GraphTallyWallet"
 group   = "billing"
-watch   = ["eth", "grt"]
+checks  = ["eth", "grt"]
 
   [accounts.arbitrum-one.activity]
   emitter = "PaymentsEscrow"
@@ -104,13 +98,13 @@ watch   = ["eth", "grt"]
 [[accounts.arbitrum-one]]
 address = "NetworkMonitor"
 group   = "infra"
-watch   = ["eth"]
+checks  = ["eth"]
 
 # EBO
 [[accounts.arbitrum-one]]
 address = "EpochBlockOracle"
 group   = "oracles"
-watch   = ["eth"]
+checks  = ["eth"]
 
   [accounts.arbitrum-one.activity]
   emitter = "EBODataEdge"
@@ -120,7 +114,7 @@ watch   = ["eth"]
 [[accounts.arbitrum-one]]
 address = "RewardsEligibilityOracle"
 group   = "oracles"
-watch   = ["eth"]
+checks  = ["eth"]
 
   [accounts.arbitrum-one.activity]
   emitter = "RewardsEligibilityContract"
@@ -130,7 +124,7 @@ watch   = ["eth"]
 [[accounts.arbitrum-one]]
 address = "UpgradeIndexerCurationBot"
 group   = "infra"
-watch   = ["eth"]
+checks  = ["eth"]
 
   # Signalled is emitted for every curator, thousands of times. Answered by the subgraph
   # source in one lookup; searching the chain for it instead is slow.
@@ -142,7 +136,7 @@ watch   = ["eth"]
 [[accounts.arbitrum-one]]
 address = "SamOracleEdgeAndNode"
 group   = "oracles"
-watch   = ["eth"]
+checks  = ["eth"]
 
   [accounts.arbitrum-one.activity]
   emitter = "SubgraphAvailabilityManager"
@@ -152,7 +146,7 @@ watch   = ["eth"]
 [[accounts.arbitrum-one]]
 address = "SamOracleGraphOps"
 group   = "oracles"
-watch   = ["eth"]
+checks  = ["eth"]
 
   [accounts.arbitrum-one.activity]
   emitter = "SubgraphAvailabilityManager"
@@ -162,7 +156,7 @@ watch   = ["eth"]
 [[accounts.arbitrum-one]]
 address = "SamOracleInfraDAO"
 group   = "oracles"
-watch   = ["eth"]
+checks  = ["eth"]
 
   [accounts.arbitrum-one.activity]
   emitter = "SubgraphAvailabilityManager"
@@ -172,7 +166,7 @@ watch   = ["eth"]
 [[accounts.arbitrum-one]]
 address = "SamOracleSemiotic"
 group   = "oracles"
-watch   = ["eth"]
+checks  = ["eth"]
 
   [accounts.arbitrum-one.activity]
   emitter = "SubgraphAvailabilityManager"
@@ -226,3 +220,12 @@ id    = "9DR6unCi6gxi5CfJDszZygF4uA4j2qyTCxsJttw1CwdK"
 [[subgraphs.gnosis]]
 label = "Gateway QoS Oracle"
 id    = "Dtr9rETvwokot4BSXaD5tECanXfqfJKcvHuaaEgPDD2D"
+
+# ---------------------------------------------------------------------------------------
+# Network checks
+# ---------------------------------------------------------------------------------------
+# Checks about the protocol on a network, rather than any one account or subgraph. Keyed by
+# network; each reads that network's subgraph source.
+#
+# [checks.arbitrum-one]
+# solo_deployments = true

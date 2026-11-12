@@ -1,22 +1,24 @@
 //! Cycle orchestration: verify, pin, read, judge, report.
 //!
-//! One cycle covers every configured network. Each network is a lane: its RPC is verified, its
-//! head pinned and its watches read, independently of the others, so one chain's outage blinds
-//! only that chain's watches. Subgraphs are checked alongside, each against its own chain.
+//! Sources first, then checks. Each network is a lane: its RPC is verified, its head pinned and
+//! its account checks read, independently of the others, so one chain's outage blinds only that
+//! chain's checks. Subgraph checks run alongside, each against its own chain, and network-wide
+//! checks (solo deployments) read the network's subgraph source. Every check yields a `Reading`
+//! with a subject; nothing downstream needs to know which kind of check produced it.
 //!
 //! One cycle produces one `CycleReport`, which every reporter — console, JSON, metrics —
 //! renders from.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::check::{DynCheck, Fault, Reading, Unreadable};
+use crate::checks;
 use crate::config::Resolved;
 use crate::error::Result;
 use crate::read::{ReadCtx, ReadPlan};
 use crate::rpc::{BlockSpec, Client, PinnedBlock};
 use crate::source::{RpcSource, SourceFault, SourceHealth, SourceId};
 use crate::subgraph::{SubgraphCheck, SubgraphHealth};
-use crate::watch::{DynWatch, Reading};
-use crate::watches;
 
 /// What happened on one network this cycle.
 pub struct NetworkReport {
@@ -25,29 +27,25 @@ pub struct NetworkReport {
     pub source: SourceHealth,
     /// Absent when the source failed verification and nothing could be read.
     pub block: Option<PinnedBlock>,
-    /// How many watches this network has. Zero for a network that runs only so its subgraphs
-    /// can be measured; its RPC being down blinds nothing else.
-    pub watches: usize,
+    /// How many checks read through this network's RPC. Zero for a network that runs only so
+    /// its subgraphs can be measured; its RPC being down blinds nothing else.
+    pub checks: usize,
 }
 
 impl NetworkReport {
-    /// The RPC failed while watches depended on it: those watches were not evaluated.
+    /// The RPC failed while checks depended on it: those checks were not evaluated.
     pub fn is_blind(&self) -> bool {
-        !self.source.is_up() && self.watches > 0
+        !self.source.is_up() && self.checks > 0
     }
 }
 
 /// One pass over every configured check, on every network.
 pub struct CycleReport {
     pub networks: Vec<NetworkReport>,
-    /// Subgraphs the tool reads from, verified like the RPCs. Nothing reads through one yet,
-    /// so one being down blinds no watch.
+    /// Subgraphs the tool reads from, verified like the RPCs.
     pub subgraph_sources: Vec<SourceHealth>,
-    /// Every network's readings. Each carries its network in `labels.network`.
+    /// One per check, of every kind, on every network.
     pub readings: Vec<Reading>,
-    /// One per subgraph check. Subgraphs are monitored components, not inputs: no watch reads
-    /// one, so a subgraph being down makes nothing else unreadable.
-    pub subgraphs: Vec<SubgraphHealth>,
     pub duration: Duration,
 }
 
@@ -56,7 +54,7 @@ impl CycleReport {
         self.networks.iter().find(|n| n.network == name)
     }
 
-    /// Networks whose watches went unread because their RPC failed.
+    /// Networks whose checks went unread because their RPC failed.
     pub fn blind_networks(&self) -> impl Iterator<Item = &NetworkReport> {
         self.networks.iter().filter(|n| n.is_blind())
     }
@@ -66,14 +64,16 @@ impl CycleReport {
         self.networks.iter().any(|n| n.source.is_up())
     }
 
-    /// Subgraphs checked and found unhealthy. A finding about the network.
-    pub fn subgraphs_down(&self) -> impl Iterator<Item = &SubgraphHealth> {
-        self.subgraphs.iter().filter(|s| s.is_down())
+    /// Checks that read and judged their subject faulty. A finding about the subject.
+    pub fn faults(&self) -> impl Iterator<Item = (&Reading, &Fault)> {
+        self.readings
+            .iter()
+            .filter_map(|r| r.fault().map(|f| (r, f)))
     }
 
-    /// Subgraphs we could not check, e.g. no API key. A problem on our side.
-    pub fn subgraphs_not_checked(&self) -> impl Iterator<Item = &SubgraphHealth> {
-        self.subgraphs.iter().filter(|s| s.is_not_checked())
+    /// Readings of one check kind.
+    pub fn of_kind<'a>(&'a self, kind: &'a str) -> impl Iterator<Item = &'a Reading> {
+        self.readings.iter().filter(move |r| r.id.kind == kind)
     }
 
     /// Checks that could not be read. Distinct from any value, including zero: an endpoint
@@ -94,14 +94,14 @@ impl CycleReport {
     }
 }
 
-/// One network: its RPC and the watches read through it.
+/// One network: its RPC and the checks read through it.
 struct Lane {
     network: String,
     chain_id: u64,
     client: Client,
     source: RpcSource,
-    checks: Vec<Box<dyn DynWatch>>,
-    /// `Activity` ids to ask this network's subgraph source for: one per event watch that
+    checks: Vec<Box<dyn DynCheck>>,
+    /// `Activity` ids to ask this network's subgraph source for: one per activity check that
     /// matches on the transaction sender, plus each event's any-sender entity.
     activity_ids: Vec<String>,
 }
@@ -111,6 +111,8 @@ pub struct Engine {
     lanes: Vec<Lane>,
     subgraph_sources: Vec<(SourceId, SubgraphCheck)>,
     subgraphs: Vec<SubgraphCheck>,
+    /// Networks that run the solo deployments check.
+    solo_deployments: Vec<String>,
     http: alloy::transports::http::reqwest::Client,
 }
 
@@ -128,7 +130,7 @@ impl Engine {
 
             let mut checks = Vec::new();
             for account in &net.accounts {
-                checks.extend(watches::for_account(&net.name, account, token));
+                checks.extend(checks::for_account(&net.name, account, token));
             }
 
             let wanted: Vec<_> = net
@@ -192,12 +194,16 @@ impl Engine {
             lanes,
             subgraph_sources,
             subgraphs,
+            solo_deployments: config.solo_deployments.clone(),
             http: alloy::transports::http::reqwest::Client::new(),
         })
     }
 
-    pub fn watch_count(&self) -> usize {
-        self.lanes.iter().map(|l| l.checks.len()).sum()
+    /// Every check, of every kind.
+    pub fn check_count(&self) -> usize {
+        self.lanes.iter().map(|l| l.checks.len()).sum::<usize>()
+            + self.subgraphs.len()
+            + self.solo_deployments.len()
     }
 
     pub fn network_count(&self) -> usize {
@@ -241,8 +247,8 @@ impl Engine {
             })
             .collect();
 
-        // Subgraph sources are verified before the watches read, since activity watches read
-        // through them. Only a verified one is used; otherwise those watches search the chain.
+        // Subgraph sources are verified before any check reads, since activity and solo checks
+        // read through them. Only a verified one is used.
         let sources = self
             .check_subgraphs(self.subgraph_sources.iter().map(|(_, c)| c), &heads, now)
             .await;
@@ -260,8 +266,8 @@ impl Engine {
             })
             .collect();
 
-        // Monitored subgraphs need nothing from the watches, so they are checked meanwhile.
-        let (lanes, subgraphs) = tokio::join!(
+        // Subgraph and network-wide checks need nothing from the lanes, so they run meanwhile.
+        let (lanes, subgraphs, solo) = tokio::join!(
             futures::future::join_all(self.lanes.iter().zip(healths).map(|(lane, health)| {
                 let activity = usable
                     .iter()
@@ -269,7 +275,17 @@ impl Engine {
                     .map(|(_, endpoint)| *endpoint);
                 lane.read(health, block, activity, &self.http)
             })),
-            self.check_subgraphs(self.subgraphs.iter(), &heads, now)
+            self.timed_subgraph_checks(&heads, now),
+            futures::future::join_all(self.solo_deployments.iter().map(|network| {
+                let endpoint = usable.iter().find(|(n, _)| n == network).map(|(_, e)| *e);
+                let source = self
+                    .subgraph_sources
+                    .iter()
+                    .find(|(_, c)| &c.network == network)
+                    .map(|(id, _)| id.to_string())
+                    .unwrap_or_else(|| format!("subgraph:{network}"));
+                crate::solo::run(network, &self.http, endpoint, source)
+            }))
         );
         let subgraph_sources = self
             .subgraph_sources
@@ -284,14 +300,33 @@ impl Engine {
             networks.push(report);
             readings.extend(lane_readings);
         }
+        readings.extend(subgraphs);
+        readings.extend(solo);
 
         CycleReport {
             networks,
             subgraph_sources,
             readings,
-            subgraphs,
             duration: started.elapsed(),
         }
+    }
+
+    /// The monitored subgraphs as readings, each with how long its own check took.
+    async fn timed_subgraph_checks(
+        &self,
+        heads: &[(&str, &Client, Option<PinnedBlock>)],
+        now: u64,
+    ) -> Vec<Reading> {
+        futures::future::join_all(self.subgraphs.iter().map(|sg| async move {
+            let started = Instant::now();
+            let health = self
+                .check_subgraphs(std::iter::once(sg), heads, now)
+                .await
+                .pop()
+                .expect("one check in, one health out");
+            health.into_reading(started.elapsed())
+        }))
+        .await
     }
 
     /// Subgraph checks, concurrently, each measured against its own chain's head.
@@ -328,8 +363,9 @@ impl Lane {
             .iter()
             .map(|c| Reading {
                 id: c.id(),
-                labels: c.labels(),
-                observation: Err(reason.clone()),
+                network: c.network().to_string(),
+                subject: c.subject(),
+                observation: Err(Unreadable::new("source_unavailable", reason.clone())),
                 remediation: None,
                 duration: Duration::ZERO,
             })
@@ -343,11 +379,11 @@ impl Lane {
             chain_id: self.chain_id,
             source,
             block,
-            watches: self.checks.len(),
+            checks: self.checks.len(),
         }
     }
 
-    /// Stages 1 and 2 for this network's watches, given its verified (or failed) source and,
+    /// Stages 1 and 2 for this network's checks, given its verified (or failed) source and,
     /// when it has a verified one, its subgraph source for activity.
     async fn read(
         &self,
@@ -400,8 +436,8 @@ impl Lane {
         );
         let mut ctx = ReadCtx::prefetch(&self.client, pinned, &plan).await;
 
-        // Last-seen records in one query. A failure here is not a failure of any watch: the
-        // activity watches fall back to searching the chain, as they would without a source.
+        // Last-seen records in one query. A failure here is not a failure of any check: the
+        // activity checks fall back to searching the chain, as they would without a source.
         if let (Some(endpoint), false) = (activity, self.activity_ids.is_empty()) {
             match crate::subgraph::query_activity(http, endpoint, &self.activity_ids).await {
                 Ok(index) => {
@@ -442,17 +478,18 @@ fn now_unix() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::check::{CheckId, Observation, Subject};
     use crate::source::SourceId;
-    use crate::watch::{Labels, WatchId};
 
     fn outcome(readable: bool) -> Reading {
         Reading {
-            id: WatchId::new("eth_balance", "w"),
-            labels: Labels::default(),
+            id: CheckId::new("eth_balance", "w"),
+            network: "arbitrum-one".into(),
+            subject: Subject::Network,
             observation: if readable {
-                Ok(crate::watch::Observation::new("read"))
+                Ok(Observation::new("read"))
             } else {
-                Err("could not read".into())
+                Err(Unreadable::read_failed("could not read"))
             },
             remediation: None,
             duration: Duration::ZERO,
@@ -464,12 +501,11 @@ mod tests {
             networks: vec![network("arbitrum-one", true, 1)],
             subgraph_sources: Vec::new(),
             readings,
-            subgraphs: Vec::new(),
             duration: Duration::ZERO,
         }
     }
 
-    fn network(name: &str, up: bool, watches: usize) -> NetworkReport {
+    fn network(name: &str, up: bool, checks: usize) -> NetworkReport {
         NetworkReport {
             network: name.into(),
             chain_id: 1,
@@ -478,13 +514,13 @@ mod tests {
                 ..SourceHealth::new(SourceId::rpc(name), name)
             },
             block: None,
-            watches,
+            checks,
         }
     }
 
     #[test]
-    fn a_down_rpc_blinds_only_a_network_with_watches() {
-        // Gnosis runs only for its subgraphs: its RPC failing leaves no watch unread.
+    fn a_down_rpc_blinds_only_a_network_with_checks() {
+        // Gnosis runs only for its subgraphs: its RPC failing leaves no check unread.
         let mut r = report(vec![]);
         r.networks = vec![
             network("arbitrum-one", true, 20),
@@ -517,8 +553,8 @@ mod tests {
     #[test]
     fn remediations_are_counted_separately_from_reads() {
         let mut o = outcome(true);
-        o.remediation = Some(crate::watch::RemediationIntent {
-            asset: crate::watch::Asset::Eth,
+        o.remediation = Some(crate::check::RemediationIntent {
+            asset: crate::check::Asset::Eth,
             observed: crate::units::Amount::zero(18),
             below: crate::units::Amount::zero(18),
             top_up_by: crate::units::Amount::zero(18),
@@ -528,5 +564,16 @@ mod tests {
         let r = report(vec![outcome(true), o]);
         assert_eq!(r.counts(), (2, 0));
         assert_eq!(r.remediations().count(), 1);
+    }
+
+    #[test]
+    fn faults_come_from_any_kind_of_check() {
+        let mut down = outcome(true);
+        down.id = CheckId::new("subgraph", "network@Qm1");
+        down.observation = Ok(Observation::new("down").with_fault("indexing_error", "failed"));
+        let r = report(vec![outcome(true), down, outcome(false)]);
+        let kinds: Vec<&str> = r.faults().map(|(_, f)| f.kind).collect();
+        assert_eq!(kinds, ["indexing_error"]);
+        assert_eq!(r.of_kind("subgraph").count(), 1);
     }
 }

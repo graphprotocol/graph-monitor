@@ -119,21 +119,21 @@ PaymentsEscrow      = "0x..."
 GraphTallyCollector = "0x..."
 ```
 
-`GraphToken` is a **required** key for any network with GRT or allowance watches — it is
+`GraphToken` is a **required** key for any network with GRT or allowance checks — it is
 how the tool finds GRT. The key is always spelled `GraphToken` regardless of what the deployed
 contract calls itself on that chain.
 
 ### Accounts
 
-Keyed by network. `watch` lists the assets to read; a `remediate` block implies its asset is
-watched. Groups are labels with no behavior. The full model, including what belongs here versus
+Keyed by network. `checks` lists the account checks to run (`eth`, `grt`, `activity`); a
+`remediate` block implies its balance check and an `activity` block the activity check. Groups are labels with no behavior. The full model, including what belongs here versus
 in Grafana, is in `CHECKS_PLAN.md`.
 
 ```toml
 [[accounts.arbitrum-one]]
 address = "BillingWallet"
 group   = "graph-foundation"
-watch   = ["eth", "grt"]
+checks  = ["eth", "grt"]
 
   [[accounts.arbitrum-one.allowances]]
   spender = "NetworkMonitor"
@@ -239,9 +239,9 @@ count of pending repairs when remediation is configured.
 
 | Code | Meaning |
 |---|---|
-| 0 | The cycle ran. Some watches may be unreadable; that is reported, not fatal |
+| 0 | The cycle ran. Some checks may be unreadable; that is reported, not fatal |
 | 2 | Usage or config error (bad address, unknown network, unresolvable name) |
-| 3 | A network's RPC failed verification, so that network's watches were not read |
+| 3 | A network's RPC failed verification, so that network's account checks were not read |
 
 There is deliberately no exit code for "a balance is low" — the tool has no opinion about that.
 A dead source *is* non-zero, because a run that read nothing must not look like a clean pass to
@@ -251,9 +251,9 @@ cron.
 
 ```
 graph-monitor
-├── status                       read every watch and show what it found
-│   ├── --flat                   one line per watch instead of grouped tables
-│   └── --unreadable-only        only watches that failed to read
+├── status                       run every check and show what it found
+│   ├── --flat                   one line per check instead of grouped tables
+│   └── --problems               with --flat, only unreadable and faulty checks
 │
 ├── config
 │   ├── show                     what config resolved to after layering
@@ -285,8 +285,9 @@ These are not implemented yet; only accounts exist, and `status` already covers 
 
 `status` reads and reports. There is no pass/fail, no severity, and no threshold — the tool
 exports what it saw and Grafana decides whether it is acceptable (see `CHECKS_PLAN.md`,
-decision 8). This is why the unit is a **watch** producing a **reading**, rather than a check
-producing a verdict.
+decision 8). A check produces a **reading** about its subject: measurements, or why it could
+not read. The only verdict a check can carry is a fault on a subject it read (a subgraph down),
+and that is still a finding to export, not a pass/fail for the run.
 
 The single exception is remediation, which needs a trigger to act on.
 
@@ -308,41 +309,49 @@ is configured — printing an empty table would let a typo'd label read as "this
 |---|---|
 | `--account <label\|addr>` | One account, by label or address |
 | `--group <name>` | Every account in a group |
-| `--kind <kind>` | One watch kind, e.g. `eth_balance` |
+| `--kind <kind>` | One check kind: `eth_balance`, `grt_balance`, `activity`, `allowance`, `subgraph`, `solo_deployments` |
 | `--spender <name\|addr>` | Allowances to one spender |
 
 ### JSON shape
 
-`--json` on any command. Block provenance first, then data.
+`--json` on any command. Block provenance first, then data. Every check is one entry in
+`checks`, whatever its kind, carrying its subject.
 
 ```json
 {
-  "network": "arbitrum-one",
-  "chain_id": 42161,
-  "block": 508876294,
-  "block_timestamp": "2026-09-25T20:42:41Z",
-  "source": { "id": "rpc:arbitrum-one", "up": true, "lag_seconds": 0 },
-  "counts": { "read": 21, "unreadable": 1 },
-  "watches": [
+  "networks": [
     {
-      "watch": "eth_balance",
+      "network": "arbitrum-one",
+      "chain_id": 42161,
+      "block": 508876294,
+      "block_timestamp": "2026-09-25T20:42:41Z",
+      "source": { "id": "rpc:arbitrum-one", "up": true, "summary": "…", "lag_seconds": 0 }
+    }
+  ],
+  "subgraph_sources": [],
+  "counts": { "read": 21, "unreadable": 1, "faults": 0 },
+  "checks": [
+    {
+      "network": "arbitrum-one",
+      "check": "eth_balance",
       "instance": "BillingWallet",
-      "read": "ok",
+      "subject": { "kind": "account", "group": "billing", "account": "BillingWallet", "address": "0x05F9…" },
+      "state": "ok",
       "summary": "BillingWallet holds 0.0349 ETH",
-      "account": "BillingWallet",
-      "group": "graph-foundation",
-      "address": "0x05F9…",
+      "unreadable": null,
+      "fault": null,
       "remediation": null,
       "measurements": [
         { "name": "account_eth_balance", "value": 0.0349, "unit": "ETH" }
-      ]
+      ],
+      "facts": {}
     }
   ]
 }
 ```
 
-A failed read carries `"read": "failed"` and an **empty** `measurements` array — never a zero,
-which would be indistinguishable from an empty wallet.
+`state` is `ok`, `fault` (read, and judged unhealthy) or `unreadable`. An unreadable check
+carries `"unreadable": {"kind", "reason"}` and an **empty** `measurements` array, never a zero, which would be indistinguishable from an empty wallet.
 
 ## Data sources
 

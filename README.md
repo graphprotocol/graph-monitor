@@ -1,8 +1,9 @@
 # Graph Monitor
 
-`graph-monitor` reads the operational state of [The Graph](https://thegraph.com) protocol from
-chain: the balances, allowances and on-chain activity of the wallets that billing, oracles and
-infrastructure depend on. It runs once and prints a readout, or runs continuously and exports
+`graph-monitor` reads the operational state of [The Graph](https://thegraph.com) protocol: the
+balances, allowances and on-chain activity of the wallets that billing, oracles and
+infrastructure depend on, the health of the protocol's subgraphs, and protocol-wide signals such
+as solo deployments. It runs once and prints a readout, or runs continuously and exports
 Prometheus metrics.
 
 Two rules shape everything it reports:
@@ -13,9 +14,32 @@ Two rules shape everything it reports:
   whether a value is acceptable is decided in Grafana. The one exception is the optional
   remediation trigger (see [Remediation](#remediation)).
 
-Balances, allowances and everything else read live come from RPC. Account activity ("last seen")
-comes from a subgraph source when the account's network has one, and from an RPC log search
-otherwise.
+## Model: sources, then checks
+
+The tool **reads from sources** and **runs checks**. A source is an input, verified every cycle
+before anything reads through it: each network's RPC (`rpc:<network>`) and, optionally, a
+subgraph it reads from (`subgraph:<label>`). If a source is down, the tool is blind, and every
+check that needed it reports **unreadable**. That is a problem with the tool, not with the
+network.
+
+Every check has a **subject**: the thing it is about. A check either reads its subject and
+reports measurements (and, for subgraph checks, a fault when it judges the subject unhealthy), or
+it could not read and says why. Could not read is never zero.
+
+| Check | Subject | Reads from | Measurements (labels) | Repairs |
+|---|---|---|---|---|
+| ETH balance | account | rpc | `gm_account_eth_balance` (network, group, account, address) | yes |
+| GRT balance | account | rpc | `gm_account_grt_balance` | yes |
+| Activity | account | subgraph source, falling back to rpc | `gm_account_idle_seconds`, `gm_account_activity_seen` | – |
+| Allowance | owner → spender pair | rpc | `gm_allowance_grt`, `_unlimited`, `_exact_max` (network, group, owner, spender) | – |
+| Subgraph health | subgraph / deployment | the subgraph itself (gateway or url) | `gm_subgraph_up`, `_block_height`, `_blocks_behind`, `_lag_seconds` (network, subgraph, deployment) | – |
+| Solo deployments | network, measured per indexer | subgraph source | `gm_indexer_solo_deployments`, `gm_indexer_solo_signal_grt` (network, indexer) | – |
+
+Subjects are declared where they live in config: `[[accounts.<network>]]` expands into account
+and allowance checks, `[[subgraphs.<network>]]` into subgraph checks, and
+`[checks.<network>]` turns on checks about the protocol as a whole. Whether each check could
+read is exported per subject kind as `gm_<subject>_readable`, and what is wrong as
+`gm_<subject>_fault{kind}`. See [`grafana/`](grafana/README.md#metrics).
 
 ## Usage
 
@@ -26,13 +50,14 @@ cargo build --release
 
 | Command | Does |
 |---|---|
-| `status` | Read every watch and show what it found. `--flat` for one line per watch, `--unreadable-only` for failures only. |
+| `status` | Run every check and show what it found. `--flat` for one line per check, `--flat --problems` for only the unreadable and faulty ones. |
 | `config show` | What config resolved to after layering, env expansion and name resolution. |
 | `config addresses` | The address book of every network. |
 | `serve` | Run a cycle every `--interval` seconds (default 120) and export metrics on `--metrics-port` (default 9090). |
 
 `status` and `serve` take repeatable filters: `--account <label|addr>`, `--group <name>`,
-`--kind <kind>` and `--spender <name|addr>`.
+`--kind <kind>` and `--spender <name|addr>`. Kinds are `eth_balance`, `grt_balance`,
+`activity`, `allowance`, `subgraph` and `solo_deployments`.
 
 Every configured network runs: each network with accounts, and each whose subgraphs have an RPC
 to be measured against. Every row says which chain it is on. `--network <name>` narrows a run to
@@ -44,9 +69,9 @@ Useful global flags: `--network`, `--rpc-url`, `--block <n|latest>`, `--json`, `
 
 | Exit code | Meaning |
 |---|---|
-| 0 | The cycle ran. Some watches may be unreadable; that is reported, not fatal. |
+| 0 | The cycle ran. Some checks may be unreadable; that is reported, not fatal. |
 | 2 | Usage or config error. |
-| 3 | A network's RPC failed verification, so that network's watches were not read. A network that runs only for its subgraphs does not count. |
+| 3 | A network's RPC failed verification, so that network's account checks were not read. A network that runs only for its subgraphs does not count. |
 
 ## Docker
 
@@ -61,7 +86,7 @@ see [RELEASE.md](RELEASE.md) for the tags.
 ## Configuration
 
 The shipped [`config/default.toml`](config/default.toml) is compiled into the binary. It holds the
-sources, the Arbitrum One and Gnosis networks, an address book, the default list of watched
+sources, the Arbitrum One and Gnosis networks, an address book, the default list of
 accounts, and the subgraphs to check, so the tool runs with no config at all.
 
 The config separates two things:
@@ -69,20 +94,21 @@ The config separates two things:
 - **Sources** are what the tool reads from: `[sources.rpc.<network>]` and
   `[sources.subgraph.<network>]`, both keyed by the chain they serve. Each is verified every cycle before anything is read through it; if
   one is down, the tool is blind, which is a problem with the tool rather than with the network. A
-  network's RPC is how its watches read, and what its subgraphs are measured against. A subgraph
+  network's RPC is how its account checks read, and what its subgraphs are measured against. A subgraph
   source sets exactly one of `id`, `deployment` or `url` (and an optional `label`), and must
   answer from the expected deployment, without indexing errors, within `max_lag` (default 15
   minutes). The same subgraph can also be monitored under `[[subgraphs.*]]`.
 
-  A subgraph source answers activity watches. If it carries generic `Activity` entities (id
-  `<emitter>-<topic0>-<sender>`), every watch with an `activity` block on that network reads its
-  account's last-seen record in one query per cycle, instead of scanning logs. The tool knows
-  nothing about which events a subgraph indexes: an event with no "any sender" record is not
-  indexed, and that watch searches the chain instead. So do `match = "to"` watches, and every
-  watch while the source is down. A record older than the account's `lookback` still reports its
-  idle time, but does not count as seen.
-- **Everything else** is what the tool watches, each keyed by network: address books
-  (`[addresses.<network>]`), accounts, and subgraphs. Chain ids are built in for well-known
+  A subgraph source answers activity checks. If it carries generic `Activity` entities (id
+  `<emitter>-<topic0>-<sender>`), every account with an `activity` block on that network reads its
+  last-seen record in one query per cycle, instead of scanning logs. The tool knows nothing about
+  which events a subgraph indexes: an event with no "any sender" record is not indexed, and that
+  check searches the chain instead. So do `match = "to"` checks, and every activity check while
+  the source is down. A record older than the account's `lookback` still reports its idle time,
+  but does not count as seen. Network checks such as `solo_deployments` read it too, and have no
+  fallback: while it is down they are unreadable.
+- **Everything else** declares what the tool checks, each keyed by network: address books
+  (`[addresses.<network>]`), accounts, subgraphs and network checks. Chain ids are built in for well-known
   networks (mainnet, sepolia, arbitrum-one, arbitrum-sepolia, gnosis); any other network sets
   `chain_id` in its `[sources.rpc.<network>]`, and every RPC is checked against it.
 
@@ -111,7 +137,7 @@ max_log_range   = 10000   # largest eth_getLogs span to try
 address = "0x..."
 label   = "MyWallet"
 group   = "infra"
-watch   = ["eth", "grt"]
+checks  = ["eth", "grt"]    # also "activity"; a remediate or activity block implies its check
 ```
 
 | Environment variable | Same as |
@@ -124,7 +150,8 @@ watch   = ["eth", "grt"]
 The shipped RPC endpoints are the free public ones, which rate-limit quickly. Point `url` at a real
 provider for anything beyond a quick look.
 
-Older configs had a `[networks.<network>]` block holding the RPC settings, chain id, address book and
+Older configs named an account's checks `watch = [...]`; that key now fails with an error saying
+it is `checks`. Older configs also had a `[networks.<network>]` block holding the RPC settings, chain id, address book and
 signer key. A config still using it fails with an error mapping each field to its new place.
 
 ## Subgraphs
@@ -158,6 +185,23 @@ max_lag     = "15m"
 The `id` check follows whatever version is published. Each entry in `deployments` is checked
 separately, which covers an upgrade: the new version indexing while the old one still serves.
 
+## Network checks
+
+Some checks are about the protocol on a network rather than any one account or subgraph. They are
+turned on per network and read that network's subgraph source, so one must be configured.
+
+```toml
+[checks.arbitrum-one]
+solo_deployments = true
+```
+
+**Solo deployments** counts, per indexer, the deployments it alone is allocated to that have
+curation signal and are not denied rewards, and the GRT signalled on them. It reads the
+network-monitoring subgraph's `Indexer.soloCount` and `soloSignalledTokens`, so the source must
+be a version with solo tracking; an older one makes the check unreadable with a message saying
+so. No indexer is excluded: the upgrade indexer is expected to have many, and filtering it is a
+choice for the dashboard.
+
 ## Remediation
 
 An account can carry a `remediate` block that tops up its ETH balance when it falls below a
@@ -184,7 +228,7 @@ points for alert rules. Scrape `:9090/metrics` rather than pushing, so a dead pr
 ## Repository layout
 
 ```
-crates/core/   config, RPC access, watches and the engine. No output formatting.
+crates/core/   config, sources, checks and the engine. No output formatting.
 crates/cli/    the graph-monitor binary: command tree, table/JSON rendering, metrics server.
 config/        shipped default config, embedded at build time.
 grafana/       dashboard and metrics reference.

@@ -75,15 +75,15 @@ pub struct RemediationArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Read every watch and show what it found
+    /// Run every check and show what it found
     Status {
-        /// One line per watch instead of grouped tables.
+        /// One line per check instead of grouped tables.
         #[arg(long)]
         flat: bool,
 
-        /// Only show watches that could not be read.
+        /// With --flat, only the checks that could not read or found a fault.
         #[arg(long)]
-        unreadable_only: bool,
+        problems: bool,
 
         #[command(flatten)]
         filter: Filter,
@@ -127,7 +127,8 @@ pub struct Filter {
     #[arg(long = "group", value_name = "GROUP")]
     pub groups: Vec<String>,
 
-    /// Only watches of these kinds, e.g. `eth_balance`. Repeatable.
+    /// Only checks of these kinds, e.g. `eth_balance`, `subgraph`, `solo_deployments`.
+    /// Repeatable.
     #[arg(long = "kind", value_name = "KIND")]
     pub kinds: Vec<String>,
 

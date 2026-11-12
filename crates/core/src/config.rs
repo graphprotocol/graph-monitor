@@ -82,6 +82,17 @@ struct RawConfig {
     /// subgraph indexes, which is what its lag is measured against.
     #[serde(default)]
     subgraphs: BTreeMap<String, Vec<RawSubgraph>>,
+    /// Checks about a network as a whole, keyed by network: `[checks.arbitrum-one]`.
+    #[serde(default)]
+    checks: BTreeMap<String, RawNetworkChecks>,
+}
+
+/// Checks whose subject is the protocol on a network, not an account or a subgraph.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawNetworkChecks {
+    /// Solo deployments per indexer, read from the network's subgraph source.
+    solo_deployments: Option<bool>,
 }
 
 /// Inputs. RPCs today; subgraphs the tool reads from (the Graph Monitor subgraph) later.
@@ -166,9 +177,12 @@ struct RawAccount {
     /// Free-form grouping label. No behavior attached.
     group: Option<String>,
     enabled: Option<bool>,
-    /// Which assets to read: `["eth", "grt"]`. A `remediate` block implies its asset.
+    /// Which account checks to run: `["eth", "grt", "activity"]`. A `remediate` block
+    /// implies its balance check, an `activity` block the activity check.
     #[serde(default)]
-    watch: Vec<String>,
+    checks: Vec<String>,
+    /// Renamed to `checks`. Accepted only to say so.
+    watch: Option<toml::Value>,
     eth: Option<RawAsset>,
     grt: Option<RawAsset>,
     /// Event-driven activity. Present, it supersedes nonce-based activity for this account.
@@ -266,7 +280,7 @@ pub struct Account {
     pub address: String,
     pub group: Option<String>,
     pub enabled: bool,
-    pub watch: Vec<String>,
+    pub checks: Vec<String>,
     pub eth: Option<AssetSpec>,
     pub grt: Option<AssetSpec>,
     pub activity: Option<ActivityConfig>,
@@ -291,6 +305,11 @@ pub struct Subgraph {
     pub source: Source,
 }
 
+#[derive(Debug, Default, Clone)]
+pub struct NetworkChecks {
+    pub solo_deployments: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct Config {
     /// Address books, keyed by network.
@@ -304,6 +323,8 @@ pub struct Config {
     pub subgraph_sources: BTreeMap<String, SubgraphSource>,
     pub gateway: Gateway,
     pub subgraphs: BTreeMap<String, Vec<Subgraph>>,
+    /// Network-wide checks, keyed by network.
+    pub checks: BTreeMap<String, NetworkChecks>,
     /// Human-readable list of the layers actually loaded, for error messages.
     pub sources: Vec<String>,
     pub used_defaults: bool,
@@ -382,6 +403,7 @@ impl Config {
     }
 
     fn merge(&mut self, raw: RawConfig, source: Source, label: &str) -> Result<()> {
+        let layer = label;
         self.sources.push(label.to_string());
 
         if raw.default_network.is_some() {
@@ -431,6 +453,14 @@ impl Config {
                 if seen_in_layer.contains(&label) {
                     return Err(ConfigError::DuplicateLabel { network, label }.into());
                 }
+                if acc.watch.is_some() {
+                    return Err(ConfigError::WatchRenamed {
+                        layer: layer.to_string(),
+                        network,
+                        account: label,
+                    }
+                    .into());
+                }
                 seen_in_layer.push(label.clone());
 
                 let merged = Account {
@@ -438,7 +468,7 @@ impl Config {
                     address: acc.address,
                     group: acc.group,
                     enabled: acc.enabled.unwrap_or(true),
-                    watch: acc.watch,
+                    checks: acc.checks,
                     eth: acc.eth.map(into_asset_spec),
                     grt: acc.grt.map(into_asset_spec),
                     activity: acc.activity.map(|a| ActivityConfig {
@@ -455,6 +485,13 @@ impl Config {
                     Some(slot) => *slot = merged,
                     None => existing.push(merged),
                 }
+            }
+        }
+
+        for (network, c) in raw.checks {
+            let entry = self.checks.entry(network).or_default();
+            if let Some(on) = c.solo_deployments {
+                entry.solo_deployments = on;
             }
         }
 
@@ -544,7 +581,7 @@ impl Config {
         Ok(())
     }
 
-    /// Turn strings into typed values, for every network that has something to watch.
+    /// Turn strings into typed values, for every network that has something to check.
     ///
     /// There is no main network: every network with accounts runs, and so does every network
     /// whose subgraphs have an RPC to be measured against. `only` narrows the run to one
@@ -568,7 +605,8 @@ impl Config {
             let known = self.addresses.contains_key(want)
                 || self.accounts.contains_key(want)
                 || self.subgraphs.contains_key(want)
-                || self.rpcs.contains_key(want);
+                || self.rpcs.contains_key(want)
+                || self.checks.contains_key(want);
             if !known {
                 let mut available: std::collections::BTreeSet<String> =
                     self.rpcs.keys().cloned().collect();
@@ -596,13 +634,18 @@ impl Config {
 
         let mut subgraphs = self.resolve_subgraphs()?;
         let mut subgraph_sources = self.resolve_subgraph_sources()?;
+        let mut solo_deployments = self.resolve_solo_deployments(&subgraph_sources)?;
         if let Some(want) = only {
             subgraphs.retain(|s| s.network == want);
             subgraph_sources.retain(|s| s.network == want);
+            solo_deployments.retain(|n| n == want);
         }
 
-        if networks.iter().all(|n| n.accounts.is_empty()) && subgraphs.is_empty() {
-            return Err(ConfigError::NothingToWatch {
+        if networks.iter().all(|n| n.accounts.is_empty())
+            && subgraphs.is_empty()
+            && solo_deployments.is_empty()
+        {
+            return Err(ConfigError::NothingToCheck {
                 sources: self.sources.clone(),
             }
             .into());
@@ -612,6 +655,7 @@ impl Config {
             networks,
             subgraph_sources,
             subgraphs,
+            solo_deployments,
             sources: self.sources.clone(),
             used_defaults: self.used_defaults,
         })
@@ -666,19 +710,19 @@ impl Config {
                 &label_addresses,
             )?;
 
-            // A remediate block implies its asset is watched: configuring repair for an asset
+            // A remediate block implies its balance check: configuring repair for an asset
             // that is never read would be inert, and silently so.
-            let mut watch_eth = eth_remediate.is_some();
-            let mut watch_grt = grt_remediate.is_some();
-            let mut watch_activity = false;
-            for asset in &acc.watch {
+            let mut check_eth = eth_remediate.is_some();
+            let mut check_grt = grt_remediate.is_some();
+            let mut check_activity = false;
+            for asset in &acc.checks {
                 match asset.to_ascii_lowercase().as_str() {
-                    "eth" => watch_eth = true,
-                    "grt" => watch_grt = true,
-                    "activity" => watch_activity = true,
+                    "eth" => check_eth = true,
+                    "grt" => check_grt = true,
+                    "activity" => check_activity = true,
                     other => {
-                        return Err(ConfigError::UnknownWatchAsset {
-                            field: format!("{base}.watch"),
+                        return Err(ConfigError::UnknownAccountCheck {
+                            field: format!("{base}.checks"),
                             value: other.to_string(),
                         }
                         .into())
@@ -719,9 +763,9 @@ impl Config {
                 }
                 None => None,
             };
-            // An activity block implies the watch, the same way a remediate block implies its
+            // An activity block implies the check, the same way a remediate block implies its
             // asset: configuring it and never reading it would be inert, and silently so.
-            let watch_activity = watch_activity || activity.is_some();
+            let check_activity = check_activity || activity.is_some();
 
             let mut allowances = Vec::new();
             for spender in &acc.allowances {
@@ -739,9 +783,9 @@ impl Config {
                 label: acc.label.clone(),
                 address,
                 group: acc.group.clone(),
-                watch_eth,
-                watch_grt,
-                watch_activity,
+                check_eth,
+                check_grt,
+                check_activity,
                 activity,
                 eth_remediate,
                 grt_remediate,
@@ -924,6 +968,29 @@ impl Config {
         Ok(GatewayEndpoints { base, api_key })
     }
 
+    /// Networks that run the solo deployments check. It reads the network's subgraph source,
+    /// so turning it on without one is a config error rather than a check that never reads.
+    fn resolve_solo_deployments(&self, sources: &[ResolvedSubgraphSource]) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        for (network, checks) in &self.checks {
+            if !checks.solo_deployments {
+                continue;
+            }
+            if !sources.iter().any(|s| &s.network == network) {
+                return Err(ConfigError::InvalidValue {
+                    field: format!("checks.{network}.solo_deployments"),
+                    value: "true".to_string(),
+                    reason: format!(
+                        "it reads the network-monitoring subgraph; add [sources.subgraph.{network}]"
+                    ),
+                }
+                .into());
+            }
+            out.push(network.clone());
+        }
+        Ok(out)
+    }
+
     /// Subgraphs the tool reads from.
     ///
     /// Like watched subgraphs, a missing API key is not a config error: the source reports
@@ -1022,10 +1089,10 @@ pub struct ResolvedAccount {
     pub label: String,
     pub address: Address,
     pub group: Option<String>,
-    pub watch_eth: bool,
-    pub watch_grt: bool,
+    pub check_eth: bool,
+    pub check_grt: bool,
     /// Archive-only: locating the last transaction means reading historical nonces.
-    pub watch_activity: bool,
+    pub check_activity: bool,
     /// Event-driven activity. When set, it replaces the nonce search for this account.
     pub activity: Option<ActivitySpec>,
     pub eth_remediate: Option<RemediationSpec>,
@@ -1037,7 +1104,7 @@ pub struct ResolvedAccount {
 impl ResolvedAccount {
     /// True when anything about this account needs a token read.
     pub fn needs_token(&self) -> bool {
-        self.watch_grt || !self.allowances.is_empty()
+        self.check_grt || !self.allowances.is_empty()
     }
 }
 
@@ -1183,6 +1250,8 @@ pub struct Resolved {
     /// Subgraphs the tool reads from.
     pub subgraph_sources: Vec<ResolvedSubgraphSource>,
     pub subgraphs: Vec<ResolvedSubgraph>,
+    /// Networks that run the solo deployments check.
+    pub solo_deployments: Vec<String>,
     /// The config layers loaded, for messages.
     pub sources: Vec<String>,
     pub used_defaults: bool,
@@ -1410,7 +1479,7 @@ BillingWallet = "0x2222222222222222222222222222222222222222"
 [[accounts.arbitrum-one]]
 address = "BillingWallet"
 group = "billing"
-watch = ["eth"]
+checks = ["eth"]
 "#;
 
     /// The Arbitrum network from a resolved config, for tests about one network.
@@ -1460,22 +1529,22 @@ group = "billing"
             .iter()
             .find(|a| a.label == "PaymentsEscrow")
             .unwrap();
-        assert!(!escrow.watch_eth && !escrow.watch_grt);
+        assert!(!escrow.check_eth && !escrow.check_grt);
         let billing = resolved
             .accounts
             .iter()
             .find(|a| a.label == "BillingWallet")
             .unwrap();
-        assert!(billing.watch_eth);
+        assert!(billing.check_eth);
     }
 
     #[test]
-    fn watch_selects_which_assets_are_read() {
+    fn checks_select_what_is_read() {
         let config = load(
             r#"
 [[accounts.arbitrum-one]]
 address = "PaymentsEscrow"
-watch = ["grt"]
+checks = ["grt"]
 "#,
         );
         let acc = arb(&config)
@@ -1483,18 +1552,18 @@ watch = ["grt"]
             .into_iter()
             .find(|a| a.label == "PaymentsEscrow")
             .unwrap();
-        assert!(acc.watch_grt && !acc.watch_eth);
+        assert!(acc.check_grt && !acc.check_eth);
         assert!(acc.needs_token());
     }
 
     #[test]
-    fn an_unknown_watch_asset_is_rejected_rather_than_ignored() {
+    fn an_unknown_account_check_is_rejected_rather_than_ignored() {
         // Silently not reading something the operator asked for is the worst outcome.
         let config = load(
             r#"
 [[accounts.arbitrum-one]]
 address = "PaymentsEscrow"
-watch = ["btc"]
+checks = ["btc"]
 "#,
         );
         let err = config.resolve(None, None).unwrap_err().to_string();
@@ -1503,7 +1572,7 @@ watch = ["btc"]
     }
 
     #[test]
-    fn a_remediate_block_implies_its_asset_is_watched() {
+    fn a_remediate_block_implies_its_balance_check() {
         // Configuring repair for an asset that is never read would be inert, and silently so.
         let config = load(
             r#"
@@ -1521,7 +1590,7 @@ from = "BillingWallet"
             .into_iter()
             .find(|a| a.label == "PaymentsEscrow")
             .unwrap();
-        assert!(acc.watch_grt);
+        assert!(acc.check_grt);
         let r = acc.grt_remediate.expect("remediation configured");
         assert_eq!(r.below.as_str(), "25000");
         assert_eq!(r.from.unwrap().display, "BillingWallet");
@@ -1541,18 +1610,18 @@ from = "BillingWallet"
             r#"
 [[accounts.arbitrum-one]]
 address = "BillingWallet"
-watch = ["eth", "grt"]
+checks = ["eth", "grt"]
 
 [[accounts.arbitrum-one]]
 address = "PaymentsEscrow"
-watch = ["grt"]
+checks = ["grt"]
 "#,
         );
         let resolved = arb(&config);
         assert_eq!(resolved.accounts.len(), 2);
         let billing = &resolved.accounts[0];
         assert_eq!(billing.label, "BillingWallet");
-        assert!(billing.watch_grt, "user layer replaced the shipped entry");
+        assert!(billing.check_grt, "user layer replaced the shipped entry");
         assert_eq!(billing.source, Source::User);
     }
 
@@ -1579,9 +1648,9 @@ address = "BillingWallet"
 enabled = false
 "#,
         );
-        // The only account was disabled, so there is nothing left to watch at all.
+        // The only account was disabled, so there is nothing left to check at all.
         let err = config.resolve(None, None).unwrap_err().to_string();
-        assert!(err.contains("nothing to watch"), "{err}");
+        assert!(err.contains("nothing to check"), "{err}");
     }
 
     #[test]
@@ -1624,12 +1693,12 @@ max_lag = "5m"
     #[test]
     fn chain_ids_are_built_in_for_known_networks_and_configurable_for_others() {
         // Known: nothing to configure beyond the url.
-        let known = load("[sources.rpc.gnosis]\nurl = \"http://g\"\n[[accounts.gnosis]]\naddress = \"0x7777777777777777777777777777777777777777\"\nwatch = [\"eth\"]\n");
+        let known = load("[sources.rpc.gnosis]\nurl = \"http://g\"\n[[accounts.gnosis]]\naddress = \"0x7777777777777777777777777777777777777777\"\nchecks = [\"eth\"]\n");
         let resolved = known.resolve(Some("gnosis"), None).unwrap();
         assert_eq!(resolved.networks[0].chain_id, 100);
 
         // Unknown: an error that says what to add, then it works once added.
-        let devnet = "[sources.rpc.devnet]\nurl = \"http://d\"\n[[accounts.devnet]]\naddress = \"0x7777777777777777777777777777777777777777\"\nwatch = [\"eth\"]\n";
+        let devnet = "[sources.rpc.devnet]\nurl = \"http://d\"\n[[accounts.devnet]]\naddress = \"0x7777777777777777777777777777777777777777\"\nchecks = [\"eth\"]\n";
         let err = load(devnet)
             .resolve(Some("devnet"), None)
             .unwrap_err()
@@ -1765,7 +1834,7 @@ url = "http://127.0.0.1:8545"
 chain_id = 1337
 [[accounts.local]]
 address = "0x7777777777777777777777777777777777777777"
-watch = ["grt"]
+checks = ["grt"]
 "#,
             Source::User,
         )])
@@ -1791,7 +1860,7 @@ url = "${GN_TEST_DEFINITELY_UNSET}"
     }
 
     #[test]
-    fn every_network_with_something_to_watch_runs() {
+    fn every_network_with_something_to_check_runs() {
         let config = load(
             r#"
 [sources.rpc.gnosis]
@@ -1800,7 +1869,7 @@ url = "https://gnosis.example"
 Wallet = "0x7777777777777777777777777777777777777777"
 [[accounts.gnosis]]
 address = "Wallet"
-watch = ["eth"]
+checks = ["eth"]
 "#,
         );
         let resolved = config.resolve(None, None).unwrap();
@@ -1848,7 +1917,7 @@ watch = ["eth"]
     }
 
     #[test]
-    fn nothing_to_watch_is_an_error() {
+    fn nothing_to_check_is_an_error() {
         let config = Config::from_layers(&[(
             "<user>",
             r#"
@@ -1860,7 +1929,7 @@ chain_id = 1
         )])
         .unwrap();
         let err = config.resolve(None, None).unwrap_err().to_string();
-        assert!(err.contains("nothing to watch"), "{err}");
+        assert!(err.contains("nothing to check"), "{err}");
     }
 
     #[test]
@@ -2124,5 +2193,37 @@ id = "MonitorId"
     fn shipped_defaults_parse() {
         let raw: std::result::Result<RawConfig, _> = toml::from_str(DEFAULT_CONFIG);
         assert!(raw.is_ok(), "{:?}", raw.err());
+    }
+
+    #[test]
+    fn solo_deployments_needs_the_networks_subgraph_source() {
+        let on = "[checks.arbitrum-one]\nsolo_deployments = true\n";
+        let err = load(on).resolve(None, None).unwrap_err().to_string();
+        assert!(err.contains("[sources.subgraph.arbitrum-one]"), "{err}");
+
+        let config = load(&format!(
+            "{on}[sources.subgraph.arbitrum-one]\nurl = \"http://graph-node/monitor\"\n"
+        ));
+        assert_eq!(
+            config.resolve(None, None).unwrap().solo_deployments,
+            ["arbitrum-one"]
+        );
+        // --network narrows it like everything else.
+        assert!(config
+            .resolve(Some("gnosis"), None)
+            .map(|r| r.solo_deployments.is_empty())
+            .unwrap_or(true));
+    }
+
+    #[test]
+    fn the_old_watch_key_says_what_it_became() {
+        let err = Config::from_layers(&[(
+            "<user>",
+            "[[accounts.arbitrum-one]]\naddress = \"0x0000000000000000000000000000000000000001\"\nwatch = [\"eth\"]\n",
+            Source::User,
+        )])
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("now `checks`"), "{err}");
     }
 }

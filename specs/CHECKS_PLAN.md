@@ -16,7 +16,9 @@ hand, in two languages.
 
 ### Scope of this plan
 
-**Account checks only**: GRT balance, ETH balance, GRT allowances, account activity.
+This plan started with **account checks only**: GRT balance, ETH balance, GRT allowances,
+account activity. The engine has since taken on subgraph health and the first network-wide
+check (solo deployments) without changing shape; see [the model](#model-sources-then-checks).
 
 Everything else `network-monitor` does — supply/issuance, inflation, bridge retryables, block
 drift, subgraph delta, allocated stake, the issuance keeper — is out of scope here and gets
@@ -30,6 +32,45 @@ duplicated between the two tools today.
   on them. See [Decision 8](#decisions).
 - Config-defined check *logic*. Checks are Rust; config supplies parameters.
 - Porting `network-monitor`'s non-account checks.
+
+---
+
+## Model: sources, then checks
+
+The tool **reads from sources** and **runs checks**. Sources (`rpc:<network>`,
+`subgraph:<label>`) are inputs: verified in stage 0, and if one is down the tool is blind there.
+Everything else is a check, and every check has a **subject**: the thing it is about.
+
+| Check | Subject | Reads from | Measurements (labels) | Repairs |
+|---|---|---|---|---|
+| ETH balance | account | rpc | `gm_account_eth_balance` (network, group, account, address) | yes |
+| GRT balance | account | rpc | `gm_account_grt_balance` | yes |
+| Activity | account | subgraph source, falling back to rpc | `gm_account_idle_seconds`, `gm_account_activity_seen` | – |
+| Allowance | owner → spender pair | rpc | `gm_allowance_grt`, `_unlimited`, `_exact_max` (network, group, owner, spender) | – |
+| Subgraph health | subgraph / deployment | the subgraph itself (gateway or url) | `gm_subgraph_up`, `_block_height`, `_blocks_behind`, `_lag_seconds` (network, subgraph, deployment) | – |
+| Solo deployments | network, measured per indexer | subgraph source | `gm_indexer_solo_deployments`, `gm_indexer_solo_signal_grt` (network, indexer) | – |
+
+What follows from the subject:
+
+- **Labels.** A series' labels are its subject's identity, so every series about one account
+  joins with every other, whichever check produced it. Labels are never shaped around one kind
+  of subject: that was the old `Labels` struct, account-shaped, which subgraph checks could not
+  fit and so lived outside the engine.
+- **Readability.** A check either read its subject or it could not. Could not read is one
+  concept with a reason (`read_failed`, `source_unavailable`, `not_configured`, `key_rejected`),
+  exported as `gm_<subject>_readable` and `gm_<subject>_fault{kind}`. "Not checked" for a
+  subgraph is the same thing as "unreadable" for a balance.
+- **Faults.** A check that read its subject may judge it unhealthy (a subgraph down). That is a
+  fault on a successful reading, in the same `gm_<subject>_fault` family.
+- **Config.** Subjects are declared where they live: `[[accounts.<network>]]` expands into
+  account and allowance checks, `[[subgraphs.<network>]]` into subgraph checks, and
+  `[checks.<network>]` turns on checks about the protocol as a whole. "Account" is a config
+  grouping, not a kind of check.
+- **Repair.** Only balance checks repair; the subject being an account is what makes that
+  possible, not the check kind.
+
+A network check's subject is the network; its measurements may name finer subjects (each
+indexer, for solo deployments). In code: `check::Subject`, `check::Reading`, `check::Unreadable`.
 
 ---
 
@@ -134,8 +175,8 @@ Per source, stage 0 asserts:
 Implemented in `crates/core/src/source.rs`; subgraph sources are configured under
 `[sources.subgraph.<network>]` and verified with the same check as monitored subgraphs, read as a
 source verdict (a subgraph that cannot be queried at all counts as down). Sources are verified
-before the watches read. A verified subgraph source answers activity watches from its generic
-`Activity` entities; when it is down, or does not index an event, those watches fall back to the
+before any check reads. A verified subgraph source answers activity checks from its generic
+`Activity` entities; when it is down, or does not index an event, those checks fall back to the
 RPC log search, so a subgraph outage costs speed and reach, never correctness. Subgraphs that are merely
 *monitored* (network, analytics, EBO, QoS) are components, not sources: they are checked in
 `crates/core/src/subgraph.rs` and reported beside balances, and a failure there is a finding about
@@ -248,40 +289,54 @@ zero errors look like one. Use `inc_by(0)` — same materialization, no skew.
 
 ## Metrics design
 
-Prefix `gm_`. Every series carries `network`; account series carry `group`, `account` (the
-label) and `address`.
+Prefix `gm_`. Every series carries `network`; the rest of its labels are its check's subject:
+account (`group`, `account`, `address`), allowance (`group`, `owner`, `spender`), subgraph
+(`subgraph`, `deployment`), indexer (`indexer`).
 
 ```
-# ---- observed state ------------------------------------------------------------------
-gm_account_eth_balance{network,group,account,address}      gauge
-gm_account_grt_balance{network,group,account,address}      gauge
-gm_account_allowance_grt{network,group,owner,spender}      gauge
-gm_account_idle_seconds{network,group,account,address}     gauge
+# ---- account checks ------------------------------------------------------------------
+gm_account_eth_balance{network,group,account,address}        gauge
+gm_account_grt_balance{network,group,account,address}        gauge
+gm_account_idle_seconds{network,group,account,address}       gauge
+gm_account_activity_seen{network,group,account,address}      gauge  1/0
+gm_account_ever_transacted{network,group,account,address}    gauge  1/0
 
-# ---- exact classifications f64 cannot carry ------------------------------------------
-gm_account_allowance_unlimited{network,group,owner,spender}  gauge  1/0
-gm_account_allowance_exact_max{network,group,owner,spender}  gauge  1/0
+# ---- allowance checks (exact classifications f64 cannot carry) -----------------------
+gm_allowance_grt{network,group,owner,spender}                gauge
+gm_allowance_unlimited{network,group,owner,spender}          gauge  1/0
+gm_allowance_exact_max{network,group,owner,spender}          gauge  1/0
 
-# ---- readability, not judgment -------------------------------------------------------
-gm_read_ok{check,network,group,account}                    gauge  1/0
-gm_read_unknown{check,network,group,account}               gauge  1/0
+# ---- subgraph checks -----------------------------------------------------------------
+gm_subgraph_up{network,subgraph,deployment}                  gauge  1/0
+gm_subgraph_block_height{network,subgraph,deployment}        gauge
+gm_subgraph_blocks_behind{network,subgraph,deployment}       gauge
+gm_subgraph_lag_seconds{network,subgraph,deployment}         gauge
+
+# ---- network checks ------------------------------------------------------------------
+gm_indexer_solo_deployments{network,indexer}                 gauge
+gm_indexer_solo_signal_grt{network,indexer}                  gauge
+
+# ---- readability and faults, per subject kind ----------------------------------------
+gm_<subject>_readable{<subject labels>,check}                gauge  1/0
+gm_<subject>_fault{<subject labels>,check,kind}              gauge  1, absent while healthy
+gm_check_errors_total{network,check}                         counter
+gm_check_duration_seconds{network,check}                     histogram
 
 # ---- source health -------------------------------------------------------------------
-gm_source_up{source,network}                               gauge  1/0
-gm_source_lag_seconds{source,network}                      gauge
-gm_source_block_height{source,network}                     gauge
+gm_source_up{network,source}                                 gauge  1/0
+gm_source_lag_seconds{network,source}                        gauge
+gm_source_block_height{network,source}                       gauge
+gm_source_fault{network,source,kind}                         gauge  1
 
 # ---- remediation ---------------------------------------------------------------------
-gm_remediation_threshold_eth{network,group,account}        gauge
-gm_remediation_threshold_grt{network,group,account}        gauge
-gm_remediation_total{network,account,asset,outcome}        counter
+gm_account_remediation_below{network,group,account,asset}    gauge
+gm_remediation_total{network,account,asset,outcome}          counter
 
 # ---- liveness and provenance ---------------------------------------------------------
-gm_block_height{network}                                   gauge
-gm_cycle_last_success_timestamp                            gauge
-gm_cycle_duration_seconds                                  histogram
-gm_read_duration_seconds{check}                            histogram
-gm_read_errors_total{network,source}                       counter
+gm_block_height{network}                                     gauge
+gm_cycle_last_success_timestamp                              gauge
+gm_cycle_duration_seconds                                    histogram
+gm_build_info{version}                                       gauge
 ```
 
 `group` as a label is what makes "are any oracle wallets low" a single query rather than a
@@ -303,7 +358,7 @@ out-of-order ones — backdating samples to block time would break ingestion. So
 published alongside, and `gm_block_height` is what you correlate against when a value looks
 wrong. This is the one place the "one block, one truth" principle has to bend to the sink.
 
-`gm_check_unknown` being separate from `gm_check_breach` is what lets you alert on "this check
+`gm_<subject>_readable` being separate from any value is what lets you alert on "this check
 has been blind for 10 minutes" — a condition the current monitor reports as a low-severity
 error and mostly ignores.
 
@@ -335,21 +390,21 @@ setting; the gain is that config cannot surprise you, and nothing can be armed i
 dropping a wallet into a group. If the repetition becomes painful, inheritance can be added
 later — going the other way, removing it once people rely on it, is much harder.
 
-Config declares **what to watch** and **when to repair**. It declares no alert thresholds and
+Config declares **what to check** and **when to repair**. It declares no alert thresholds and
 no severities: those live in Grafana rules.
 
 ```toml
-# Watched, nothing more. Its balances are exported; Grafana decides what is too low.
+# Checked, nothing more. Its balances are exported; Grafana decides what is too low.
 [[accounts.arbitrum-one]]
 address = "EpochBlockOracle"
 group   = "oracles"
-watch   = ["eth", "activity"]
+checks  = ["eth", "activity"]
 
-# Watched, and repaired when ETH falls below the trigger.
+# Checked, and repaired when ETH falls below the trigger.
 [[accounts.arbitrum-one]]
 address = "UpgradeIndexerCurationBot"
 group   = "oracles"
-watch   = ["eth"]
+checks  = ["eth"]
 
   [accounts.arbitrum-one.eth.remediate]
   below     = "0.001"                # the only threshold the tool holds
@@ -359,25 +414,27 @@ watch   = ["eth"]
 [[accounts.arbitrum-one]]
 address = "GraphTallyWallet"
 group   = "billing"
-watch   = ["eth", "grt", "activity"]
+checks  = ["eth", "grt", "activity"]
 
   [accounts.arbitrum-one.grt.remediate]
   below     = "25000"
   top_up_by = "30000"
   from      = "BillingWallet"
 
-  # Allowances are watched by naming the spender. No `expect` — the tool exports the value
+  # Allowances are checked by naming the spender. No `expect` — the tool exports the value
   # and the exact `unlimited` classification, and Grafana asserts whatever it wants.
   [[accounts.arbitrum-one.allowances]]
   spender = "NetworkMonitor"
 ```
 
-**`watch` replaces the threshold lists.** Previously an account was checked for ETH because it
+**`checks` replaces the threshold lists.** Previously an account was checked for ETH because it
 had an `eth.min`; with thresholds gone, something still has to say which assets to read. Being
 explicit also keeps the read plan tight — no point fetching GRT for a wallet that only ever
 holds gas.
 
-A `remediate` block implies its asset is watched, so the common case does not repeat itself.
+A `remediate` block implies its balance check, so the common case does not repeat itself.
+(This key was called `watch` until the model settled on checks; the old name fails with an
+error pointing here.)
 
 Where the group does show up:
 

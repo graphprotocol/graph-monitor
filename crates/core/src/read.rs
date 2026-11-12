@@ -323,7 +323,7 @@ impl<'a> ReadCtx<'a> {
     ///
     /// From the subgraph when it covers the event, otherwise searched back from the pinned
     /// block. The subgraph attributes events by transaction sender only, so a `match = "to"`
-    /// watch always searches.
+    /// check always searches.
     pub async fn last_event(
         &self,
         address: Address,

@@ -17,7 +17,16 @@ use alloy::primitives::{Address, B256};
 use alloy::transports::http::reqwest;
 use serde_json::Value;
 
+use crate::check::{CheckId, Measurement, Observation, Reading, Subject, Unit, Unreadable};
 use crate::rpc::{BlockSpec, Client, PinnedBlock};
+
+/// Measurement names of the subgraph check.
+pub const M_SUBGRAPH_UP: &str = "subgraph_up";
+pub const M_SUBGRAPH_BLOCK_HEIGHT: &str = "subgraph_block_height";
+pub const M_SUBGRAPH_BLOCKS_BEHIND: &str = "subgraph_blocks_behind";
+pub const M_SUBGRAPH_LAG: &str = "subgraph_lag_seconds";
+/// Text fact: the deployment that answered.
+pub const F_SERVED_DEPLOYMENT: &str = "served_deployment";
 
 /// One query, everything the check needs.
 const META_QUERY: &str =
@@ -252,6 +261,62 @@ impl SubgraphHealth {
         }
     }
 
+    /// The result as an ordinary check reading, about this subgraph.
+    ///
+    /// Not checked becomes unreadable: the tool could not look. Down is a reading with a
+    /// fault: the tool looked, and judged it unhealthy.
+    pub fn into_reading(self, duration: Duration) -> Reading {
+        let subject = Subject::Subgraph {
+            subgraph: self.subgraph.clone(),
+            deployment: self.deployment.clone(),
+        };
+        let measure = |name: &'static str, value: f64, unit: Unit| Measurement {
+            name,
+            value,
+            unit,
+            subject: subject.clone(),
+        };
+        let observation = match &self.status {
+            SubgraphStatus::NotChecked(why) => Err(Unreadable::new(why.kind(), why.to_string())),
+            status => {
+                let up = *status == SubgraphStatus::Up;
+                let mut obs = Observation::new(self.summary()).with(measure(
+                    M_SUBGRAPH_UP,
+                    if up { 1.0 } else { 0.0 },
+                    Unit::Boolean,
+                ));
+                if let Some(block) = self.indexed_block {
+                    obs = obs.with(measure(M_SUBGRAPH_BLOCK_HEIGHT, block as f64, Unit::Count));
+                }
+                if let Some(behind) = self.blocks_behind {
+                    obs = obs.with(measure(
+                        M_SUBGRAPH_BLOCKS_BEHIND,
+                        behind as f64,
+                        Unit::Count,
+                    ));
+                }
+                if let Some(lag) = self.lag {
+                    obs = obs.with(measure(M_SUBGRAPH_LAG, lag.as_secs_f64(), Unit::Seconds));
+                }
+                if let Some(served) = &self.served_deployment {
+                    obs = obs.with_fact(F_SERVED_DEPLOYMENT, served.clone());
+                }
+                if let SubgraphStatus::Down(fault) = status {
+                    obs = obs.with_fault(fault.kind(), fault.summary());
+                }
+                Ok(obs)
+            }
+        };
+        Reading {
+            id: CheckId::new("subgraph", subject.name()),
+            network: self.network,
+            subject,
+            observation,
+            remediation: None,
+            duration,
+        }
+    }
+
     /// The same check, read as a verdict on a source. For a subgraph the tool reads from,
     /// "not checked" is not a separate state: either way the tool cannot see through it.
     pub fn into_source_health(self, id: crate::source::SourceId) -> crate::source::SourceHealth {
@@ -453,6 +518,30 @@ async fn post(
         None => format!("HTTP {status}: {}", truncate(&text, 200)),
     };
     Err(classify(status.as_u16(), reason))
+}
+
+/// POST a GraphQL query and return its `data`, or why there is none. For checks that read a
+/// subgraph source.
+pub(crate) async fn query_data(
+    http: &reqwest::Client,
+    endpoint: &Endpoint,
+    body: &Value,
+) -> Result<Value, String> {
+    let text = post(http, endpoint, body.to_string())
+        .await
+        .map_err(|e| match e {
+            QueryError::Auth(r) | QueryError::Failed(r) => r,
+        })?;
+    if let Some(messages) = graphql_errors(&text) {
+        return Err(messages);
+    }
+    let value: Value =
+        serde_json::from_str(&text).map_err(|e| format!("response is not JSON ({e})"))?;
+    value
+        .get("data")
+        .filter(|d| !d.is_null())
+        .cloned()
+        .ok_or_else(|| "response has no data".to_string())
 }
 
 fn graphql_errors(body: &str) -> Option<String> {

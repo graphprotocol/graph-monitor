@@ -1,4 +1,5 @@
-//! Account checks: ETH balance, GRT balance, GRT allowance.
+//! Checks read through a network's RPC: ETH balance, GRT balance and activity (about an
+//! account), and GRT allowance (about an owner → spender pair).
 //!
 //! Each is a thin `read` over the shared context, an `observe` that turns the reading into
 //! measurements and a sentence, and — where configured — a remediation trigger. None of them
@@ -7,60 +8,63 @@
 use alloy::primitives::Address;
 
 use crate::activity::Activity;
+use crate::check::{
+    remediation_for, Asset, Check, CheckId, Measurement, Observation, RemediationIntent, Subject,
+    Unit,
+};
 use crate::config::{RemediationSpec, ResolvedAccount, Spender};
 use crate::read::{ReadCtx, ReadPlan, ETH_DECIMALS};
 use crate::units::Amount;
-use crate::watch::{
-    remediation_for, Asset, Labels, Measurement, Observation, RemediationIntent, Unit, Watch,
-    WatchId,
-};
 
 /// Measurement names. Constants because the console renderer and the metrics exporter both key
 /// off them, and a typo would silently produce an empty panel.
 pub const M_ETH_BALANCE: &str = "account_eth_balance";
 pub const M_GRT_BALANCE: &str = "account_grt_balance";
-pub const M_ALLOWANCE: &str = "account_allowance_grt";
+pub const M_ALLOWANCE: &str = "allowance_grt";
 /// Exact 1/0 classifications of a value `f64` cannot represent faithfully.
-pub const M_ALLOWANCE_UNLIMITED: &str = "account_allowance_unlimited";
-pub const M_ALLOWANCE_EXACT_MAX: &str = "account_allowance_exact_max";
+pub const M_ALLOWANCE_UNLIMITED: &str = "allowance_unlimited";
+pub const M_ALLOWANCE_EXACT_MAX: &str = "allowance_exact_max";
 pub const M_IDLE_SECONDS: &str = "account_idle_seconds";
 pub const M_EVER_TRANSACTED: &str = "account_ever_transacted";
 /// 1 when the search found activity inside its window. Distinct from `ever_transacted`: an
-/// event watch finding nothing means "not in the lookback", not "never acted".
+/// event check finding nothing means "not in the lookback", not "never acted".
 pub const M_ACTIVITY_SEEN: &str = "account_activity_seen";
 /// The configured top-up trigger. Exported whenever remediation is configured — not only when
 /// it fires — so a dashboard can draw the line even while the balance is healthy.
 pub const M_REMEDIATION_BELOW: &str = "account_remediation_below";
 
-fn labels_for(account: &ResolvedAccount, network: &str) -> Labels {
-    Labels::for_account(
-        network,
-        account.group.as_deref(),
-        &account.label,
-        account.address,
-    )
+fn subject_for(account: &ResolvedAccount) -> Subject {
+    Subject::Account {
+        group: account.group.clone(),
+        account: account.label.clone(),
+        address: account.address,
+    }
 }
 
 // ---------------------------------------------------------------------------------------
 // ETH balance
 // ---------------------------------------------------------------------------------------
 
-pub struct EthBalanceWatch {
+pub struct EthBalanceCheck {
     pub network: String,
     pub account: ResolvedAccount,
     pub remediate: Option<RemediationSpec>,
 }
 
 #[async_trait::async_trait]
-impl Watch for EthBalanceWatch {
+impl Check for EthBalanceCheck {
     type Reading = Amount;
 
-    fn id(&self) -> WatchId {
-        WatchId::new("eth_balance", &self.account.label)
+    fn id(&self) -> CheckId {
+        CheckId::new("eth_balance", &self.account.label)
     }
 
-    fn labels(&self) -> Labels {
-        labels_for(&self.account, &self.network)
+    fn network(&self) -> &str {
+        &self.network
+    }
+
+    fn subject(&self) -> Subject {
+        subject_for(&self.account)
     }
 
     fn plan(&self, plan: &mut ReadPlan) {
@@ -82,13 +86,13 @@ impl Watch for EthBalanceWatch {
             name: M_ETH_BALANCE,
             value: balance.to_f64(),
             unit: Unit::Eth,
-            labels: self.labels(),
+            subject: self.subject(),
         });
         with_trigger(
             observation,
             self.remediate.as_ref(),
             Unit::Eth,
-            self.labels(),
+            self.subject(),
         )
     }
 
@@ -101,7 +105,7 @@ impl Watch for EthBalanceWatch {
 // GRT balance
 // ---------------------------------------------------------------------------------------
 
-pub struct GrtBalanceWatch {
+pub struct GrtBalanceCheck {
     pub network: String,
     pub account: ResolvedAccount,
     pub token: Address,
@@ -109,15 +113,19 @@ pub struct GrtBalanceWatch {
 }
 
 #[async_trait::async_trait]
-impl Watch for GrtBalanceWatch {
+impl Check for GrtBalanceCheck {
     type Reading = Amount;
 
-    fn id(&self) -> WatchId {
-        WatchId::new("grt_balance", &self.account.label)
+    fn id(&self) -> CheckId {
+        CheckId::new("grt_balance", &self.account.label)
     }
 
-    fn labels(&self) -> Labels {
-        labels_for(&self.account, &self.network)
+    fn network(&self) -> &str {
+        &self.network
+    }
+
+    fn subject(&self) -> Subject {
+        subject_for(&self.account)
     }
 
     fn plan(&self, plan: &mut ReadPlan) {
@@ -142,13 +150,13 @@ impl Watch for GrtBalanceWatch {
             name: M_GRT_BALANCE,
             value: balance.to_f64(),
             unit: Unit::Grt,
-            labels: self.labels(),
+            subject: self.subject(),
         });
         with_trigger(
             observation,
             self.remediate.as_ref(),
             Unit::Grt,
-            self.labels(),
+            self.subject(),
         )
     }
 
@@ -161,7 +169,7 @@ impl Watch for GrtBalanceWatch {
 // GRT allowance
 // ---------------------------------------------------------------------------------------
 
-pub struct AllowanceWatch {
+pub struct AllowanceCheck {
     pub network: String,
     pub account: ResolvedAccount,
     pub token: Address,
@@ -169,18 +177,26 @@ pub struct AllowanceWatch {
 }
 
 #[async_trait::async_trait]
-impl Watch for AllowanceWatch {
+impl Check for AllowanceCheck {
     type Reading = Amount;
 
-    fn id(&self) -> WatchId {
-        WatchId::new(
+    fn id(&self) -> CheckId {
+        CheckId::new(
             "allowance",
             format!("{}->{}", self.account.label, self.spender.display),
         )
     }
 
-    fn labels(&self) -> Labels {
-        labels_for(&self.account, &self.network).with_spender(&self.spender.display)
+    fn network(&self) -> &str {
+        &self.network
+    }
+
+    fn subject(&self) -> Subject {
+        Subject::Allowance {
+            group: self.account.group.clone(),
+            owner: self.account.label.clone(),
+            spender: self.spender.display.clone(),
+        }
     }
 
     fn plan(&self, plan: &mut ReadPlan) {
@@ -196,7 +212,7 @@ impl Watch for AllowanceWatch {
     }
 
     fn observe(&self, allowance: &Self::Reading) -> Observation {
-        let labels = self.labels();
+        let subject = self.subject();
 
         // The value, plus the two facts `f64` cannot carry. An unlimited approval is ~1.157e59,
         // a magnitude at which a float has discarded forty digits — asking Grafana to compare
@@ -212,19 +228,19 @@ impl Watch for AllowanceWatch {
             name: M_ALLOWANCE,
             value: allowance.to_f64(),
             unit: Unit::Grt,
-            labels: labels.clone(),
+            subject: subject.clone(),
         })
         .with(Measurement {
             name: M_ALLOWANCE_UNLIMITED,
             value: bool_value(allowance.is_unlimited()),
             unit: Unit::Boolean,
-            labels: labels.clone(),
+            subject: subject.clone(),
         })
         .with(Measurement {
             name: M_ALLOWANCE_EXACT_MAX,
             value: bool_value(allowance.is_max()),
             unit: Unit::Boolean,
-            labels,
+            subject,
         })
     }
 }
@@ -233,21 +249,25 @@ impl Watch for AllowanceWatch {
 // Activity
 // ---------------------------------------------------------------------------------------
 
-pub struct ActivityWatch {
+pub struct ActivityCheck {
     pub network: String,
     pub account: ResolvedAccount,
 }
 
 #[async_trait::async_trait]
-impl Watch for ActivityWatch {
+impl Check for ActivityCheck {
     type Reading = Activity;
 
-    fn id(&self) -> WatchId {
-        WatchId::new("activity", &self.account.label)
+    fn id(&self) -> CheckId {
+        CheckId::new("activity", &self.account.label)
     }
 
-    fn labels(&self) -> Labels {
-        labels_for(&self.account, &self.network)
+    fn network(&self) -> &str {
+        &self.network
+    }
+
+    fn subject(&self) -> Subject {
+        subject_for(&self.account)
     }
 
     // Deliberately no `plan`: the search is adaptive, so its reads cannot be declared up
@@ -255,7 +275,7 @@ impl Watch for ActivityWatch {
 
     async fn read(&self, ctx: &ReadCtx<'_>) -> Result<Self::Reading, String> {
         match &self.account.activity {
-            // An event watch says what the account is *supposed to be doing*, and reads logs
+            // An event check says what the account is *supposed to be doing*, and reads logs
             // rather than historical state — so unlike the nonce search it works on a pruned
             // endpoint.
             Some(spec) => ctx.last_event(self.account.address, spec).await,
@@ -264,7 +284,7 @@ impl Watch for ActivityWatch {
     }
 
     fn observe(&self, activity: &Self::Reading) -> Observation {
-        let labels = self.labels();
+        let subject = self.subject();
         let what = match &self.account.activity {
             Some(spec) => spec.event.clone(),
             None => "a transaction".to_string(),
@@ -272,8 +292,8 @@ impl Watch for ActivityWatch {
         match activity {
             // No last-activity timestamp exists, so none is invented. `ever_transacted = 0`
             // is the fact; an idle duration would be a fabrication.
-            // Nothing found. For an event watch that means "not within the lookback"; for a
-            // nonce watch it means nonce zero. Either way no age exists, so none is reported —
+            // Nothing found. For an event check that means "not within the lookback"; for a
+            // nonce check it means nonce zero. Either way no age exists, so none is reported —
             // inventing one would be fabricating an observation.
             Activity::Never => Observation::new(match &self.account.activity {
                 Some(spec) => format!(
@@ -286,9 +306,9 @@ impl Watch for ActivityWatch {
                 name: M_ACTIVITY_SEEN,
                 value: 0.0,
                 unit: Unit::Boolean,
-                labels: labels.clone(),
+                subject: subject.clone(),
             })
-            // Only a nonce watch can claim an account has *never* acted; an event watch only
+            // Only a nonce check can claim an account has *never* acted; an event check only
             // knows it saw nothing in its window.
             .with_if(
                 self.account.activity.is_none(),
@@ -296,7 +316,7 @@ impl Watch for ActivityWatch {
                     name: M_EVER_TRANSACTED,
                     value: 0.0,
                     unit: Unit::Boolean,
-                    labels,
+                    subject,
                 },
             ),
             Activity::Last {
@@ -311,7 +331,7 @@ impl Watch for ActivityWatch {
                 name: M_IDLE_SECONDS,
                 value: *idle_seconds as f64,
                 unit: Unit::Seconds,
-                labels: labels.clone(),
+                subject: subject.clone(),
             })
             .with(Measurement {
                 name: M_ACTIVITY_SEEN,
@@ -322,7 +342,7 @@ impl Watch for ActivityWatch {
                     _ => 1.0,
                 },
                 unit: Unit::Boolean,
-                labels: labels.clone(),
+                subject: subject.clone(),
             })
             .with_if(
                 self.account.activity.is_none(),
@@ -330,7 +350,7 @@ impl Watch for ActivityWatch {
                     name: M_EVER_TRANSACTED,
                     value: 1.0,
                     unit: Unit::Boolean,
-                    labels,
+                    subject,
                 },
             ),
         }
@@ -352,7 +372,7 @@ fn with_trigger(
     observation: Observation,
     remediate: Option<&RemediationSpec>,
     unit: Unit,
-    labels: Labels,
+    subject: Subject,
 ) -> Observation {
     let Some(spec) = remediate else {
         return observation;
@@ -366,7 +386,7 @@ fn with_trigger(
         name: M_REMEDIATION_BELOW,
         value: Amount::new(raw, 18).to_f64(),
         unit,
-        labels,
+        subject,
     })
 }
 
@@ -397,32 +417,32 @@ pub fn for_account(
     network: &str,
     account: &ResolvedAccount,
     token: Address,
-) -> Vec<Box<dyn crate::watch::DynWatch>> {
-    let mut checks: Vec<Box<dyn crate::watch::DynWatch>> = Vec::new();
+) -> Vec<Box<dyn crate::check::DynCheck>> {
+    let mut checks: Vec<Box<dyn crate::check::DynCheck>> = Vec::new();
 
-    if account.watch_eth {
-        checks.push(Box::new(EthBalanceWatch {
+    if account.check_eth {
+        checks.push(Box::new(EthBalanceCheck {
             network: network.to_string(),
             account: account.clone(),
             remediate: account.eth_remediate.clone(),
         }));
     }
-    if account.watch_grt {
-        checks.push(Box::new(GrtBalanceWatch {
+    if account.check_grt {
+        checks.push(Box::new(GrtBalanceCheck {
             network: network.to_string(),
             account: account.clone(),
             token,
             remediate: account.grt_remediate.clone(),
         }));
     }
-    if account.watch_activity {
-        checks.push(Box::new(ActivityWatch {
+    if account.check_activity {
+        checks.push(Box::new(ActivityCheck {
             network: network.to_string(),
             account: account.clone(),
         }));
     }
     for spender in &account.allowances {
-        checks.push(Box::new(AllowanceWatch {
+        checks.push(Box::new(AllowanceCheck {
             network: network.to_string(),
             account: account.clone(),
             token,
@@ -445,9 +465,9 @@ mod tests {
             label: "BillingWallet".into(),
             address: Address::repeat_byte(0x11),
             group: Some("billing".into()),
-            watch_eth: false,
-            watch_grt: false,
-            watch_activity: false,
+            check_eth: false,
+            check_grt: false,
+            check_activity: false,
             activity: None,
             eth_remediate: None,
             grt_remediate: None,
@@ -468,8 +488,8 @@ mod tests {
         }
     }
 
-    fn eth_check(remediate: Option<RemediationSpec>) -> EthBalanceWatch {
-        EthBalanceWatch {
+    fn eth_check(remediate: Option<RemediationSpec>) -> EthBalanceCheck {
+        EthBalanceCheck {
             network: "arbitrum-one".into(),
             account: account(),
             remediate,
@@ -492,18 +512,18 @@ mod tests {
             lookback: std::time::Duration::from_secs(7 * 86_400),
             matches: crate::activity::TxMatch::From,
         });
-        let watch = ActivityWatch {
+        let check = ActivityCheck {
             network: "arbitrum-one".into(),
             account: acc,
         };
-        let recent = watch.observe(&Activity::Last {
+        let recent = check.observe(&Activity::Last {
             block: 1,
             idle_seconds: 86_400,
         });
         assert_eq!(recent.value(M_ACTIVITY_SEEN), Some(1.0));
 
         // A subgraph knows of a vote 8 days ago, past the 7-day lookback.
-        let old = watch.observe(&Activity::Last {
+        let old = check.observe(&Activity::Last {
             block: 1,
             idle_seconds: 8 * 86_400,
         });
@@ -517,8 +537,8 @@ mod tests {
         assert!(obs.summary.contains("0.4210"), "{}", obs.summary);
         let m = obs.measurement(M_ETH_BALANCE).expect("measurement present");
         assert_eq!(m.unit, Unit::Eth);
-        assert_eq!(m.labels.account.as_deref(), Some("BillingWallet"));
-        assert_eq!(m.labels.group.as_deref(), Some("billing"));
+        assert_eq!(m.subject.name(), "BillingWallet");
+        assert_eq!(m.subject.group(), Some("billing"));
         assert!((m.value - 0.421).abs() < 1e-12);
     }
 
@@ -551,8 +571,8 @@ mod tests {
 
     // ---- allowance ---------------------------------------------------------------------
 
-    fn allowance_check() -> AllowanceWatch {
-        AllowanceWatch {
+    fn allowance_check() -> AllowanceCheck {
+        AllowanceCheck {
             network: "arbitrum-one".into(),
             account: account(),
             token: Address::repeat_byte(0x22),
@@ -610,7 +630,7 @@ mod tests {
         let mut acc = account();
         assert!(for_account("arbitrum-one", &acc, Address::ZERO).is_empty());
 
-        acc.watch_eth = true;
+        acc.check_eth = true;
         acc.allowances = vec![Spender {
             display: "NetworkMonitor".into(),
             address: Address::repeat_byte(0x33),
@@ -625,8 +645,8 @@ mod tests {
     #[test]
     fn checks_declare_their_reads_for_batching() {
         let mut acc = account();
-        acc.watch_eth = true;
-        acc.watch_grt = true;
+        acc.check_eth = true;
+        acc.check_grt = true;
         let checks = for_account("arbitrum-one", &acc, Address::repeat_byte(0x22));
 
         let mut plan = ReadPlan::default();

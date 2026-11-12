@@ -155,7 +155,7 @@ mod tests {
     fn event_signatures_hash_to_the_topics_seen_on_chain() {
         // Observed topic0 values from Arbitrum One. A typo in a signature yields a filter that
         // silently matches nothing, which would read as "inactive" — the exact false alarm
-        // this watch exists to avoid.
+        // this check exists to avoid.
         for (sig, expected) in [
             (
                 "Log(bytes)",
@@ -306,7 +306,7 @@ pub async fn find_last_event(
     for _ in 0..MAX_LOG_REQUESTS {
         // Providers cap the span and the cap is not discoverable up front, so a rejection
         // narrows the window and retries the same window immediately. Learning happens on the
-        // client, so every later request and every other watch benefits.
+        // client, so every later request and every other check benefits.
         let mut shrinks = 0;
         let (logs, start) = loop {
             let span = client.log_range();
@@ -385,7 +385,7 @@ pub async fn find_last_event(
 
     // Out of budget before reaching the horizon. Reporting `Never` here would render as
     // "no activity", which is a false negative caused by the endpoint rather than by the
-    // account — exactly the confusion this watch exists to prevent.
+    // account — exactly the confusion this check exists to prevent.
     Err(format!(
         "searched {scanned} blocks without reaching the {}h lookback; this endpoint caps log \
          queries at {} blocks, so raise max_log_range, shorten the lookback, or use a provider \

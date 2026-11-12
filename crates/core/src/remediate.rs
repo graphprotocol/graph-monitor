@@ -18,8 +18,8 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use alloy::sol_types::SolCall;
 
+use crate::check::{Asset, Reading, RemediationIntent};
 use crate::error::{Result, RpcError};
-use crate::watch::{Asset, Reading, RemediationIntent};
 
 sol! {
     #[sol(rpc)]
@@ -135,8 +135,8 @@ impl Executor {
             let Some(intent) = &reading.remediation else {
                 continue;
             };
-            let account = reading.labels.account.clone().unwrap_or_default();
-            let Some(to) = reading.labels.address else {
+            let account = reading.subject.name();
+            let Some((_, to)) = reading.subject.account() else {
                 reports.push(RemediationReport {
                     account,
                     asset: intent.asset,

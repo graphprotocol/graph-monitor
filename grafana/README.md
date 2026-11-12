@@ -31,24 +31,23 @@ how a monitor lies:
 | | Means | Panel |
 |---|---|---|
 | a value | read successfully | balance / allowance panels |
-| **unreadable** | the tool could not see | *Unreadable* stat, *Read failures* |
+| **unreadable** | the tool could not see | *Unreadable* stat, *Check failures* |
 | **not seen** | read fine, no activity in the window | *Not seen in the lookback* |
 
-A blank cell in *Accounts now* means that asset is not watched for that account — not that it
+A blank cell in *Accounts now* means that check is not configured for that account, not that it
 is zero. A failed read publishes **no** value at all, so an outage can never be mistaken for an
 empty wallet.
 
 **Use the `Unlimited` column, not `Raw GRT`.** An unlimited approval is ~`1.157e59`; a float has
 discarded forty digits by then, so comparing the raw gauge against `2^255` gives wrong answers.
-`gm_account_allowance_unlimited` is computed on exact integers.
+`gm_allowance_unlimited` is computed on exact integers.
 
 ## Alert rules
 
-[`alerts.yaml`](alerts.yaml) is a ready-to-load rules file built from these queries. It is
-plain Prometheus format, so it works with vmalert, Prometheus or Grafana's rule import. Its
-rules aggregate away scrape-time labels like `pod` so restarts don't duplicate alerts. Below
-are the ideas behind it. Keep rules in git next to this file rather than defining them in the
-UI, so a rule and the config it depends on review together.
+No rules ship right now; alerting is being redesigned. These are the queries worth starting
+from. Aggregate away scrape-time labels like `pod` (`max by (…)`) so restarts don't duplicate
+alerts, and keep rules in git next to this file rather than defining them in the UI, so a rule
+and the config it depends on review together.
 
 **Deadman — the exporter stopped.** `up` catches a dead process; this catches one that is alive
 but wedged, which is the failure that otherwise goes unnoticed.
@@ -62,18 +61,18 @@ time() - gm_cycle_last_success_timestamp > 600
 not a wallet.
 
 ```promql
-gm_read_unknown == 1          # for: 15m
+gm_account_readable == 0      # for: 15m; likewise gm_allowance_/gm_subgraph_/gm_network_readable
 gm_source_up == 0             # for: 5m
 ```
 
 **A subgraph is down or behind.** A finding about the network, not the tool. Down already
 includes "behind by more than its `max_lag`", so one rule covers both; use
-`gm_subgraph_blocks_behind` for a tighter, per-subgraph line. Alert on `not_checked` separately:
+`gm_subgraph_blocks_behind` for a tighter, per-subgraph line. Alert on unreadable separately:
 it means our API key, not the subgraph.
 
 ```promql
 gm_subgraph_up == 0           # for: 15m
-gm_subgraph_not_checked == 1  # for: 30m
+gm_subgraph_readable == 0     # for: 30m
 ```
 
 **Low balances.** Thresholds live here, not in the tool.
@@ -103,7 +102,15 @@ gm_account_idle_seconds{account=~"SamOracle.*"} > 86400
 **An approval was revoked.** Breaks a money path silently — nothing else changes.
 
 ```promql
-gm_account_allowance_unlimited{owner="BillingWallet", spender="NetworkMonitor"} == 0
+gm_allowance_unlimited{owner="BillingWallet", spender="NetworkMonitor"} == 0
+```
+
+**An indexer is piling up solo deployments.** Signal on deployments nobody else indexes. The
+upgrade indexer is expected to have many; exclude it here rather than in the tool.
+
+```promql
+gm_indexer_solo_deployments{indexer!="0xbdfb5ee5a2abf4fc7bb1bd1221067aef7f9de491"} > 100
+delta(gm_indexer_solo_deployments[1d]) > 25
 ```
 
 **Auto-fix is broken.** More urgent than the balance that triggered it.
@@ -120,26 +127,37 @@ histogram_quantile(0.95, sum by (le) (rate(gm_cycle_duration_seconds_bucket[15m]
 
 ## Metrics
 
+Every series is labelled by its check's **subject**, so the labels name what it is about:
+
+| Subject | Labels |
+|---|---|
+| account | `network`, `group`, `account`, `address` |
+| allowance | `network`, `group`, `owner`, `spender` |
+| subgraph | `network`, `subgraph`, `deployment` (empty for the published version) |
+| indexer | `network`, `indexer` |
+| network | `network` |
+
 | Metric | Type | Notes |
 |---|---|---|
 | `gm_account_eth_balance` | gauge | ETH, whole units |
 | `gm_account_grt_balance` | gauge | GRT, whole units |
-| `gm_account_allowance_grt` | gauge | Lossy above 2^53 — see above |
-| `gm_account_allowance_unlimited` | gauge | 1/0, exact |
-| `gm_account_allowance_exact_max` | gauge | 1/0, exactly `uint256::max` — never drawn against |
 | `gm_account_idle_seconds` | gauge | Since last activity, at the pinned block |
 | `gm_account_activity_seen` | gauge | 1/0 within the lookback |
-| `gm_account_ever_transacted` | gauge | Nonce watches only, where "never" is knowable |
-| `gm_account_remediation_below` | gauge | Configured top-up trigger, exported whether or not it fires |
-| `gm_read_ok` / `gm_read_unknown` | gauge | 1/0 per watch |
-| `gm_read_errors_total` | counter | Failed reads by watch kind |
-| `gm_read_duration_seconds` | histogram | Per watch kind |
-| `gm_source_up` / `_lag_seconds` / `_block_height` | gauge | Stage 0: the sources the tool reads from. `source` is `rpc:<network>` or `subgraph:<name>`; for a subgraph the height is its latest indexed block |
-| `gm_source_fault` | gauge | 1 for the `kind` of fault while a source is down: `unreachable`, `chain_id_mismatch`, `stale`, `state_unavailable`, `wrong_deployment`, `indexing_errors`, `not_configured`, `key_rejected` |
-| `gm_subgraph_up` | gauge | 1/0 per subgraph check. Absent when not checked |
-| `gm_subgraph_not_checked` | gauge | 1 when our side failed (e.g. API key). Says nothing about the subgraph |
-| `gm_subgraph_fault` | gauge | 1 for the `kind` of fault: `unreachable`, `stale`, `wrong_deployment`, `indexing_errors` (down), `not_configured`, `key_rejected` (not checked) |
+| `gm_account_ever_transacted` | gauge | Nonce-based activity only, where "never" is knowable |
+| `gm_account_remediation_below` | gauge | Configured top-up trigger, exported whether or not it fires. Labels `network`, `group`, `account`, `asset` |
+| `gm_allowance_grt` | gauge | Lossy above 2^53, see above |
+| `gm_allowance_unlimited` | gauge | 1/0, exact |
+| `gm_allowance_exact_max` | gauge | 1/0, exactly `uint256::max`, never drawn against |
+| `gm_subgraph_up` | gauge | 1/0 per subgraph check. Absent when it could not be checked |
 | `gm_subgraph_block_height` / `_blocks_behind` / `_lag_seconds` | gauge | Latest indexed block, gap to the RPC head (absent when the RPC is down), age against the clock |
+| `gm_indexer_solo_deployments` | gauge | Deployments the indexer alone is allocated to, with signal, not denied. Indexers with none are absent |
+| `gm_indexer_solo_signal_grt` | gauge | GRT signalled on those deployments |
+| `gm_<subject>_readable` | gauge | `account`, `allowance`, `subgraph`, `network`. 1/0 per check on that subject, with a `check` label (`eth_balance`, `grt_balance`, `activity`, `allowance`, `subgraph`, `solo_deployments`) |
+| `gm_<subject>_fault` | gauge | 1 for the `kind` of what is wrong, absent while healthy. Could not read: `read_failed`, `source_unavailable`, `not_configured`, `key_rejected`. Read and judged unhealthy (subgraphs): `unreachable`, `stale`, `wrong_deployment`, `indexing_errors` |
+| `gm_check_errors_total` | counter | Unreadable checks by `network`, `check` |
+| `gm_check_duration_seconds` | histogram | Per `network`, `check` |
+| `gm_source_up` / `_lag_seconds` / `_block_height` | gauge | The sources the tool reads from. `source` is `rpc:<network>` or `subgraph:<name>`; for a subgraph the height is its latest indexed block |
+| `gm_source_fault` | gauge | 1 for the `kind` of fault while a source is down: `unreachable`, `chain_id_mismatch`, `stale`, `state_unavailable`, `wrong_deployment`, `indexing_errors`, `not_configured`, `key_rejected` |
 | `gm_block_height` | gauge | Height every value in the cycle was read at |
 | `gm_cycle_last_success_timestamp` | gauge | Deadman |
 | `gm_cycle_duration_seconds` | histogram | |

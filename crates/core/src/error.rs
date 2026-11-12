@@ -92,6 +92,16 @@ pub enum ConfigError {
     NetworksRemoved { layer: String },
 
     #[error(
+        "{layer}: account {account:?} on {network} uses `watch`, which is now `checks`: \
+         checks = [\"eth\", \"grt\", \"activity\"]"
+    )]
+    WatchRenamed {
+        layer: String,
+        network: String,
+        account: String,
+    },
+
+    #[error(
         "network {network:?} has no GraphToken entry in [addresses.{network}], which \
          GRT balance and allowance checks require{}",
         if *no_defaults {
@@ -119,8 +129,10 @@ pub enum ConfigError {
         reason: String,
     },
 
-    #[error("{field}: {value:?} is not a watchable asset (expected \"eth\" or \"grt\")")]
-    UnknownWatchAsset { field: String, value: String },
+    #[error(
+        "{field}: {value:?} is not an account check (expected \"eth\", \"grt\" or \"activity\")"
+    )]
+    UnknownAccountCheck { field: String, value: String },
 
     #[error("{field}: {value:?} is not a valid address")]
     InvalidAddress { field: String, value: String },
@@ -171,15 +183,15 @@ pub enum ConfigError {
     DuplicateLabel { network: String, label: String },
 
     #[error(
-        "nothing to watch: no network has accounts and no subgraphs are configured.\n\
+        "nothing to check: no network has accounts, subgraphs or network checks configured.\n\
          Config loaded from: {}\n\n\
          Add accounts to your config:\n\n\
          [[accounts.arbitrum-one]]\n\
          address = \"MyWallet\"   # a name from [addresses.arbitrum-one], or 0x…\n\
-         watch   = [\"eth\"]",
+         checks  = [\"eth\"]",
         join_or_none(sources)
     )]
-    NothingToWatch { sources: Vec<String> },
+    NothingToCheck { sources: Vec<String> },
 }
 
 #[derive(Debug, thiserror::Error)]

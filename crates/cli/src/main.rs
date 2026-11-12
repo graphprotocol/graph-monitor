@@ -103,18 +103,18 @@ async fn run(args: Cli) -> Result<ExitCode> {
         );
     }
 
-    // Narrow the account set before building watches: there is no reason to read state for
+    // Narrow the account set before building checks: there is no reason to read state for
     // rows the user filtered out.
-    let (flat, unreadable_only, kinds, spenders) = match &args.command {
+    let (flat, problems, kinds, spenders) = match &args.command {
         Command::Status {
             flat,
-            unreadable_only,
+            problems,
             filter,
         } => {
             resolved = filter_accounts(resolved, filter)?;
             (
                 *flat,
-                *unreadable_only,
+                *problems,
                 filter.kinds.clone(),
                 filter.spenders.clone(),
             )
@@ -155,14 +155,14 @@ async fn run(args: Cli) -> Result<ExitCode> {
         repairs.extend(exec.run(&readings_on(&report, network)).await);
     }
 
-    // A kind filter applies after the cycle: kinds are a property of the built watches, not of
+    // A kind filter applies after the cycle: kinds are a property of the built checks, not of
     // config, and skipping the reads is not worth a second filter path.
     let report = filter_kinds(report, &kinds)?;
 
     if global.json {
         println!("{}", serde_json::to_string_pretty(&render::json(&report))?);
     } else if flat {
-        print!("{}", render::flat(&report, unreadable_only));
+        print!("{}", render::flat(&report, problems));
     } else {
         print!("{}", render::grouped(&report));
     }
@@ -257,7 +257,7 @@ fn filter_accounts(mut resolved: Resolved, filter: &Filter) -> Result<Resolved> 
 }
 
 /// After a filter, drop networks it left with no accounts. A network that never had any runs
-/// for its subgraphs, and stays.
+/// for its subgraphs, and stays. Network-wide checks do not need a lane, so they do not count.
 fn drop_emptied_networks(resolved: &mut Resolved) {
     let has_subgraphs = |name: &str| resolved.subgraphs.iter().any(|s| s.network == name);
     let keep: Vec<bool> = resolved
@@ -353,11 +353,11 @@ fn filter_kinds(mut report: CycleReport, kinds: &[String]) -> Result<CycleReport
 }
 
 /// One network's readings, for that network's executor.
-fn readings_on(report: &CycleReport, network: &str) -> Vec<graph_monitor_core::watch::Reading> {
+fn readings_on(report: &CycleReport, network: &str) -> Vec<graph_monitor_core::check::Reading> {
     report
         .readings
         .iter()
-        .filter(|r| r.labels.network == network)
+        .filter(|r| r.network == network)
         .cloned()
         .collect()
 }
@@ -478,7 +478,7 @@ async fn serve(
         interval_secs,
         metrics_port,
         networks = engine.network_count(),
-        checks = engine.watch_count(),
+        checks = engine.check_count(),
         subgraphs = engine.subgraph_count(),
         "serving"
     );
@@ -620,12 +620,11 @@ fn print_config(resolved: &Resolved, cmd: &ConfigCommand, json: bool) -> Result<
                             "address": a.address.to_string(),
                             "group": a.group,
                             "source": a.source.as_str(),
-                            "watch_eth": a.watch_eth,
-                            "watch_grt": a.watch_grt,
-                            "watch_activity": a.watch_activity,
+                            "checks": account_checks(a),
                             "allowances": a.allowances.iter().map(|s| s.display.clone()).collect::<Vec<_>>(),
                             "remediates": a.eth_remediate.is_some() || a.grt_remediate.is_some(),
                         })).collect::<Vec<_>>(),
+                        "solo_deployments": resolved.solo_deployments,
                         "subgraphs": resolved.subgraphs.iter().map(|s| serde_json::json!({
                             "network": s.network,
                             "subgraph": s.subgraph,
@@ -694,24 +693,11 @@ fn print_config(resolved: &Resolved, cmd: &ConfigCommand, json: bool) -> Result<
                     ("Account", table::Align::Left),
                     ("Chain", table::Align::Left),
                     ("Group", table::Align::Left),
-                    ("Watches", table::Align::Left),
+                    ("Checks", table::Align::Left),
                     ("Remediates", table::Align::Left),
                     ("From", table::Align::Left),
                 ]);
                 for (n, a) in resolved.accounts() {
-                    let mut watches = Vec::new();
-                    if a.watch_eth {
-                        watches.push("eth".to_string());
-                    }
-                    if a.watch_grt {
-                        watches.push("grt".to_string());
-                    }
-                    if a.watch_activity {
-                        watches.push("activity".to_string());
-                    }
-                    for s in &a.allowances {
-                        watches.push(format!("allowance→{}", s.display));
-                    }
                     let mut repairs = Vec::new();
                     if a.eth_remediate.is_some() {
                         repairs.push("eth");
@@ -723,7 +709,7 @@ fn print_config(resolved: &Resolved, cmd: &ConfigCommand, json: bool) -> Result<
                         a.label.clone(),
                         n.name.clone(),
                         a.group.clone().unwrap_or_default(),
-                        watches.join(", "),
+                        account_checks(a).join(", "),
                         repairs.join(", "),
                         a.source.as_str().to_string(),
                     ]);
@@ -754,8 +740,34 @@ fn print_config(resolved: &Resolved, cmd: &ConfigCommand, json: bool) -> Result<
                     }
                     print!("{}", table.render());
                 }
+
+                if !resolved.solo_deployments.is_empty() {
+                    println!();
+                    println!(
+                        "Network checks: solo_deployments on {}",
+                        resolved.solo_deployments.join(", ")
+                    );
+                }
             }
         }
     }
     Ok(())
+}
+
+/// The checks an account expands into, as `config show` lists them.
+fn account_checks(a: &graph_monitor_core::config::ResolvedAccount) -> Vec<String> {
+    let mut checks = Vec::new();
+    if a.check_eth {
+        checks.push("eth".to_string());
+    }
+    if a.check_grt {
+        checks.push("grt".to_string());
+    }
+    if a.check_activity {
+        checks.push("activity".to_string());
+    }
+    for s in &a.allowances {
+        checks.push(format!("allowance→{}", s.display));
+    }
+    checks
 }

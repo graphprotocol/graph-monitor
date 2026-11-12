@@ -6,16 +6,17 @@
 //! `CycleReport` rather than reimplementations of it.
 
 pub mod activity;
+pub mod check;
+pub mod checks;
 pub mod config;
 pub mod engine;
 pub mod error;
 pub mod read;
 pub mod remediate;
 pub mod rpc;
+pub mod solo;
 pub mod source;
 pub mod subgraph;
 pub mod units;
-pub mod watch;
-pub mod watches;
 
 pub use error::{ConfigError, Error, Result, RpcError};

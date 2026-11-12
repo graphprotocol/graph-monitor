@@ -7,11 +7,16 @@ use std::net::SocketAddr;
 use std::sync::OnceLock;
 
 use axum::{http::StatusCode, routing::get, Router};
-use graph_monitor_core::engine::CycleReport;
-use graph_monitor_core::remediate::RemediationReport;
-use graph_monitor_core::watches::{
+use graph_monitor_core::check::{Reading, Subject, Unit};
+use graph_monitor_core::checks::{
     M_ACTIVITY_SEEN, M_ALLOWANCE, M_ALLOWANCE_EXACT_MAX, M_ALLOWANCE_UNLIMITED, M_ETH_BALANCE,
     M_EVER_TRANSACTED, M_GRT_BALANCE, M_IDLE_SECONDS, M_REMEDIATION_BELOW,
+};
+use graph_monitor_core::engine::CycleReport;
+use graph_monitor_core::remediate::RemediationReport;
+use graph_monitor_core::solo::{M_SOLO_DEPLOYMENTS, M_SOLO_SIGNAL};
+use graph_monitor_core::subgraph::{
+    M_SUBGRAPH_BLOCKS_BEHIND, M_SUBGRAPH_BLOCK_HEIGHT, M_SUBGRAPH_LAG, M_SUBGRAPH_UP,
 };
 use prometheus::{
     register_gauge, register_gauge_vec, register_histogram, register_histogram_vec,
@@ -19,43 +24,135 @@ use prometheus::{
     IntCounterVec, IntGaugeVec, TextEncoder,
 };
 
-/// A cycle spans seconds to minutes — activity watches dominate and scale with how far back
+/// A cycle spans seconds to minutes — activity checks dominate and scale with how far back
 /// they have to look. Prometheus' default buckets top out at 10s, which would put every real
 /// cycle in `+Inf` and make the histogram useless.
 const CYCLE_BUCKETS: &[f64] = &[0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0];
 
-/// A single watch: a batched balance read is milliseconds, an exhaustive activity search is
+/// A single check: a batched balance read is milliseconds, an exhaustive activity search is
 /// tens of seconds.
-const READ_BUCKETS: &[f64] = &[0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0];
+const CHECK_BUCKETS: &[f64] = &[0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0];
 use tokio::net::TcpListener;
 
-/// Labels carried by every per-account series. Order matters — it must match the order values
-/// are supplied in.
+// Every series is labelled by its subject, so the labels are the subject's identity. Order
+// matters: it must match `subject_labels`.
 const ACCOUNT_LABELS: &[&str] = &["network", "group", "account", "address"];
 const ALLOWANCE_LABELS: &[&str] = &["network", "group", "owner", "spender"];
-const WATCH_LABELS: &[&str] = &["network", "group", "account", "watch"];
 /// `deployment` is empty for the published version, and the `Qm…` id for a listed deployment.
 const SUBGRAPH_LABELS: &[&str] = &["network", "subgraph", "deployment"];
-const SUBGRAPH_LABELS_KIND: &[&str] = &["network", "subgraph", "deployment", "kind"];
+const INDEXER_LABELS: &[&str] = &["network", "indexer"];
+const NETWORK_LABELS: &[&str] = &["network"];
+
+/// The values of `labels_for(subject.kind())`, in order.
+fn subject_labels(network: &str, subject: &Subject) -> Vec<String> {
+    let mut out = vec![network.to_string()];
+    match subject {
+        Subject::Account {
+            account, address, ..
+        } => out.extend([
+            subject.group_or_ungrouped().to_string(),
+            account.clone(),
+            address.to_string(),
+        ]),
+        Subject::Allowance { owner, spender, .. } => out.extend([
+            subject.group_or_ungrouped().to_string(),
+            owner.clone(),
+            spender.clone(),
+        ]),
+        Subject::Subgraph {
+            subgraph,
+            deployment,
+        } => out.extend([subgraph.clone(), deployment.clone().unwrap_or_default()]),
+        Subject::Indexer { indexer } => out.push(format!("{indexer:#x}")),
+        Subject::Network => {}
+    }
+    out
+}
+
+fn labels_for(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "account" => ACCOUNT_LABELS,
+        "allowance" => ALLOWANCE_LABELS,
+        "subgraph" => SUBGRAPH_LABELS,
+        "indexer" => INDEXER_LABELS,
+        _ => NETWORK_LABELS,
+    }
+}
+
+/// Whether one subject kind's checks could read, and what they found wrong. Per subject kind
+/// so the series join on the same labels as that subject's values.
+pub struct CheckHealth {
+    /// `gm_<kind>_readable{<subject>, check}`
+    pub readable: IntGaugeVec,
+    /// `gm_<kind>_fault{<subject>, check, kind}`
+    pub fault: IntGaugeVec,
+}
+
+impl CheckHealth {
+    fn new(kind: &str) -> Self {
+        let mut labels = labels_for(kind).to_vec();
+        labels.push("check");
+        let readable = register_int_gauge_vec!(
+            format!("gm_{kind}_readable"),
+            format!(
+                "1 when the check read this {kind}, 0 when it could not. Unreadable is distinct \
+                 from any value, including zero: no value series is published for it"
+            ),
+            &labels
+        )
+        .unwrap();
+        labels.push("kind");
+        let fault = register_int_gauge_vec!(
+            format!("gm_{kind}_fault"),
+            format!(
+                "1 for what is wrong with this {kind}: why the check could not read it \
+                 (read_failed, source_unavailable, not_configured, key_rejected) or what it \
+                 judged wrong once it did (e.g. unreachable, stale, indexing_errors). Absent \
+                 while healthy"
+            ),
+            &labels
+        )
+        .unwrap();
+        Self { readable, fault }
+    }
+
+    fn reset(&self) {
+        self.readable.reset();
+        self.fault.reset();
+    }
+}
 
 pub struct Metrics {
-    // Observed state.
+    // Account checks.
     pub eth_balance: GaugeVec,
     pub grt_balance: GaugeVec,
-    pub allowance: GaugeVec,
     pub idle_seconds: GaugeVec,
-
-    // Exact classifications a float cannot carry.
-    pub allowance_unlimited: IntGaugeVec,
-    pub allowance_exact_max: IntGaugeVec,
     pub ever_transacted: IntGaugeVec,
     pub activity_seen: IntGaugeVec,
+    pub remediation_threshold: GaugeVec,
 
-    // Readability, not judgment.
-    pub read_ok: IntGaugeVec,
-    pub read_unknown: IntGaugeVec,
-    pub read_duration: HistogramVec,
-    pub read_errors: IntCounterVec,
+    // Allowance checks. The flags are exact classifications a float cannot carry.
+    pub allowance: GaugeVec,
+    pub allowance_unlimited: IntGaugeVec,
+    pub allowance_exact_max: IntGaugeVec,
+
+    // Subgraph checks.
+    pub subgraph_up: IntGaugeVec,
+    pub subgraph_block_height: IntGaugeVec,
+    pub subgraph_blocks_behind: IntGaugeVec,
+    pub subgraph_lag_seconds: GaugeVec,
+
+    // Network checks, measured per indexer.
+    pub solo_deployments: IntGaugeVec,
+    pub solo_signal: GaugeVec,
+
+    // Readability and faults, per subject kind.
+    pub account_health: CheckHealth,
+    pub allowance_health: CheckHealth,
+    pub subgraph_health: CheckHealth,
+    pub network_health: CheckHealth,
+    pub check_duration: HistogramVec,
+    pub check_errors: IntCounterVec,
 
     // Source health.
     pub source_up: IntGaugeVec,
@@ -63,16 +160,7 @@ pub struct Metrics {
     pub source_block_height: IntGaugeVec,
     pub source_fault: IntGaugeVec,
 
-    // Subgraphs, as monitored components of the network. Not sources: see `subgraph.rs`.
-    pub subgraph_up: IntGaugeVec,
-    pub subgraph_not_checked: IntGaugeVec,
-    pub subgraph_block_height: IntGaugeVec,
-    pub subgraph_blocks_behind: IntGaugeVec,
-    pub subgraph_lag_seconds: GaugeVec,
-    pub subgraph_fault: IntGaugeVec,
-
     // Remediation.
-    pub remediation_threshold: GaugeVec,
     pub remediation_total: IntCounterVec,
 
     // Liveness and provenance.
@@ -93,41 +181,20 @@ impl Metrics {
         Self {
             eth_balance: register_gauge_vec!(
                 "gm_account_eth_balance",
-                "ETH balance of a watched account",
+                "ETH balance of an account",
                 ACCOUNT_LABELS
             )
             .unwrap(),
             grt_balance: register_gauge_vec!(
                 "gm_account_grt_balance",
-                "GRT balance of a watched account",
+                "GRT balance of an account",
                 ACCOUNT_LABELS
-            )
-            .unwrap(),
-            allowance: register_gauge_vec!(
-                "gm_account_allowance_grt",
-                "GRT allowance granted by owner to spender. Lossy above 2^53 — use \
-                 gm_account_allowance_unlimited to test for an inexhaustible approval",
-                ALLOWANCE_LABELS
             )
             .unwrap(),
             idle_seconds: register_gauge_vec!(
                 "gm_account_idle_seconds",
-                "Seconds since the account last sent a transaction, at the pinned block",
+                "Seconds since the account last acted, at the pinned block",
                 ACCOUNT_LABELS
-            )
-            .unwrap(),
-            allowance_unlimited: register_int_gauge_vec!(
-                "gm_account_allowance_unlimited",
-                "1 when the allowance is effectively inexhaustible. Computed on exact integers, \
-                 because the gauge cannot represent 2^256 faithfully",
-                ALLOWANCE_LABELS
-            )
-            .unwrap(),
-            allowance_exact_max: register_int_gauge_vec!(
-                "gm_account_allowance_exact_max",
-                "1 when the allowance is exactly uint256 max — an infinite approval never drawn \
-                 against",
-                ALLOWANCE_LABELS
             )
             .unwrap(),
             ever_transacted: register_int_gauge_vec!(
@@ -139,44 +206,98 @@ impl Metrics {
             activity_seen: register_int_gauge_vec!(
                 "gm_account_activity_seen",
                 "1 when the activity search found something inside its window. For an event \
-                 watch, 0 means nothing within the lookback — not that the account never acted",
+                 check, 0 means nothing within the lookback — not that the account never acted",
                 ACCOUNT_LABELS
             )
             .unwrap(),
-            read_duration: register_histogram_vec!(
+            remediation_threshold: register_gauge_vec!(
+                "gm_account_remediation_below",
+                "Balance below which the tool tops this account up. Exported whenever \
+                 remediation is configured, not only when it fires, so a dashboard can draw \
+                 the line while the balance is still healthy. Not an alert threshold — \
+                 alerting lives in Grafana",
+                &["network", "group", "account", "asset"]
+            )
+            .unwrap(),
+            allowance: register_gauge_vec!(
+                "gm_allowance_grt",
+                "GRT allowance granted by owner to spender. Lossy above 2^53 — use \
+                 gm_allowance_unlimited to test for an inexhaustible approval",
+                ALLOWANCE_LABELS
+            )
+            .unwrap(),
+            allowance_unlimited: register_int_gauge_vec!(
+                "gm_allowance_unlimited",
+                "1 when the allowance is effectively inexhaustible. Computed on exact integers, \
+                 because the gauge cannot represent 2^256 faithfully",
+                ALLOWANCE_LABELS
+            )
+            .unwrap(),
+            allowance_exact_max: register_int_gauge_vec!(
+                "gm_allowance_exact_max",
+                "1 when the allowance is exactly uint256 max — an infinite approval never drawn \
+                 against",
+                ALLOWANCE_LABELS
+            )
+            .unwrap(),
+            subgraph_up: register_int_gauge_vec!(
+                "gm_subgraph_up",
+                "1 when the subgraph answered, from the expected deployment, without indexing \
+                 errors and within max_lag. Absent when it could not be checked — see \
+                 gm_subgraph_readable",
+                SUBGRAPH_LABELS
+            )
+            .unwrap(),
+            subgraph_block_height: register_int_gauge_vec!(
+                "gm_subgraph_block_height",
+                "Latest block the subgraph has indexed",
+                SUBGRAPH_LABELS
+            )
+            .unwrap(),
+            subgraph_blocks_behind: register_int_gauge_vec!(
+                "gm_subgraph_blocks_behind",
+                "Blocks between the subgraph's latest indexed block and the RPC's head. Absent \
+                 when the RPC failed verification, since there is no head to measure against",
+                SUBGRAPH_LABELS
+            )
+            .unwrap(),
+            subgraph_lag_seconds: register_gauge_vec!(
+                "gm_subgraph_lag_seconds",
+                "Age of the subgraph's latest indexed block against wall clock",
+                SUBGRAPH_LABELS
+            )
+            .unwrap(),
+            solo_deployments: register_int_gauge_vec!(
+                "gm_indexer_solo_deployments",
+                "Deployments this indexer is the only one allocated to, that have curation \
+                 signal and are not denied rewards. Indexers with none are absent",
+                INDEXER_LABELS
+            )
+            .unwrap(),
+            solo_signal: register_gauge_vec!(
+                "gm_indexer_solo_signal_grt",
+                "GRT signalled on this indexer's solo deployments",
+                INDEXER_LABELS
+            )
+            .unwrap(),
+            account_health: CheckHealth::new("account"),
+            allowance_health: CheckHealth::new("allowance"),
+            subgraph_health: CheckHealth::new("subgraph"),
+            network_health: CheckHealth::new("network"),
+            check_duration: register_histogram_vec!(
                 prometheus::HistogramOpts::new(
-                    "gm_read_duration_seconds",
-                    "Wall time of one watch, by kind"
+                    "gm_check_duration_seconds",
+                    "Wall time of one check, by kind"
                 )
-                .buckets(READ_BUCKETS.to_vec()),
-                &["network", "watch"]
+                .buckets(CHECK_BUCKETS.to_vec()),
+                &["network", "check"]
             )
             .unwrap(),
-            read_errors: register_int_counter_vec!(
-                "gm_read_errors_total",
-                "Watches that could not read, by kind. Rising without gm_source_up dropping \
+            check_errors: register_int_counter_vec!(
+                "gm_check_errors_total",
+                "Checks that could not read, by kind. Rising without gm_source_up dropping \
                  usually means a provider limit rather than an outage",
-                &["network", "watch"]
-            )
-            .unwrap(),
-            build_info: register_int_gauge_vec!(
-                "gm_build_info",
-                "Always 1. Carries the running version so a change in behaviour can be lined \
-                 up against a deploy",
-                &["version"]
-            )
-            .unwrap(),
-            read_ok: register_int_gauge_vec!(
-                "gm_read_ok",
-                "1 when this watch read its value successfully",
-                WATCH_LABELS
-            )
-            .unwrap(),
-            read_unknown: register_int_gauge_vec!(
-                "gm_read_unknown",
-                "1 when this watch could not read its value. Distinct from any value, including \
-                 zero",
-                WATCH_LABELS
+                &["network", "check"]
             )
             .unwrap(),
             source_up: register_int_gauge_vec!(
@@ -205,57 +326,6 @@ impl Metrics {
                 &["network", "source", "kind"]
             )
             .unwrap(),
-            subgraph_fault: register_int_gauge_vec!(
-                "gm_subgraph_fault",
-                "1 for the kind of fault a subgraph check found: unreachable, wrong_deployment, \
-                 indexing_errors or stale (down), not_configured or key_rejected (not checked). \
-                 Absent while the subgraph is up",
-                SUBGRAPH_LABELS_KIND
-            )
-            .unwrap(),
-            subgraph_up: register_int_gauge_vec!(
-                "gm_subgraph_up",
-                "1 when the subgraph answered, from the expected deployment, without indexing \
-                 errors and within max_lag. Absent when it was not checked — see \
-                 gm_subgraph_not_checked",
-                SUBGRAPH_LABELS
-            )
-            .unwrap(),
-            subgraph_not_checked: register_int_gauge_vec!(
-                "gm_subgraph_not_checked",
-                "1 when the subgraph could not be checked for a reason on our side, such as a \
-                 missing or rejected API key. Says nothing about the subgraph itself",
-                SUBGRAPH_LABELS
-            )
-            .unwrap(),
-            subgraph_block_height: register_int_gauge_vec!(
-                "gm_subgraph_block_height",
-                "Latest block the subgraph has indexed",
-                SUBGRAPH_LABELS
-            )
-            .unwrap(),
-            subgraph_blocks_behind: register_int_gauge_vec!(
-                "gm_subgraph_blocks_behind",
-                "Blocks between the subgraph's latest indexed block and the RPC's head. Absent \
-                 when the RPC failed verification, since there is no head to measure against",
-                SUBGRAPH_LABELS
-            )
-            .unwrap(),
-            subgraph_lag_seconds: register_gauge_vec!(
-                "gm_subgraph_lag_seconds",
-                "Age of the subgraph's latest indexed block against wall clock",
-                SUBGRAPH_LABELS
-            )
-            .unwrap(),
-            remediation_threshold: register_gauge_vec!(
-                "gm_account_remediation_below",
-                "Balance below which the tool tops this account up. Exported whenever \
-                 remediation is configured, not only when it fires, so a dashboard can draw \
-                 the line while the balance is still healthy. Not an alert threshold — \
-                 alerting lives in Grafana",
-                &["network", "group", "account", "asset"]
-            )
-            .unwrap(),
             remediation_total: register_int_counter_vec!(
                 "gm_remediation_total",
                 "Remediation attempts by outcome",
@@ -280,38 +350,58 @@ impl Metrics {
             )
             .buckets(CYCLE_BUCKETS.to_vec()))
             .unwrap(),
+            build_info: register_int_gauge_vec!(
+                "gm_build_info",
+                "Always 1. Carries the running version so a change in behaviour can be lined \
+                 up against a deploy",
+                &["version"]
+            )
+            .unwrap(),
         }
     }
 
     /// Publish one cycle.
     ///
-    /// Every labelled family is reset first. Without it, an account removed from config keeps
+    /// Every labelled family is reset first. Without it, a subject removed from config keeps
     /// exporting its last value forever, and a dashboard shows a wallet that is no longer
-    /// watched as though it were healthy.
+    /// checked as though it were healthy. It also makes a value that could not be measured
+    /// this cycle absent rather than last cycle's.
     pub fn publish(&self, report: &CycleReport) {
-        self.eth_balance.reset();
-        self.grt_balance.reset();
-        self.allowance.reset();
-        self.idle_seconds.reset();
-        self.allowance_unlimited.reset();
-        self.allowance_exact_max.reset();
-        self.ever_transacted.reset();
-        self.activity_seen.reset();
-        self.read_ok.reset();
-        self.read_unknown.reset();
-        // Reset too: a trigger removed from config must stop drawing a line on a dashboard.
-        self.remediation_threshold.reset();
+        for family in [
+            &self.eth_balance,
+            &self.grt_balance,
+            &self.idle_seconds,
+            &self.remediation_threshold,
+            &self.allowance,
+            &self.subgraph_lag_seconds,
+            &self.solo_signal,
+            &self.source_lag_seconds,
+        ] {
+            family.reset();
+        }
+        for family in [
+            &self.ever_transacted,
+            &self.activity_seen,
+            &self.allowance_unlimited,
+            &self.allowance_exact_max,
+            &self.subgraph_up,
+            &self.subgraph_block_height,
+            &self.subgraph_blocks_behind,
+            &self.solo_deployments,
+            &self.source_up,
+            &self.source_block_height,
+            &self.source_fault,
+            &self.block_height,
+        ] {
+            family.reset();
+        }
+        for health in self.healths() {
+            health.reset();
+        }
 
         self.build_info
             .with_label_values(&[env!("CARGO_PKG_VERSION")])
             .set(1);
-
-        // Reset with the rest: a network removed from config must stop exporting.
-        self.source_up.reset();
-        self.source_lag_seconds.reset();
-        self.source_block_height.reset();
-        self.source_fault.reset();
-        self.block_height.reset();
 
         let sources = report
             .networks
@@ -341,52 +431,6 @@ impl Metrics {
             }
         }
 
-        // Reset so a subgraph removed from config stops exporting, and so a number that could
-        // not be measured this cycle is absent rather than last cycle's.
-        self.subgraph_up.reset();
-        self.subgraph_not_checked.reset();
-        self.subgraph_block_height.reset();
-        self.subgraph_blocks_behind.reset();
-        self.subgraph_lag_seconds.reset();
-        self.subgraph_fault.reset();
-        for sg in &report.subgraphs {
-            // The chain the subgraph indexes, which need not be the one this process reads.
-            let labels = [
-                sg.network.as_str(),
-                sg.subgraph.as_str(),
-                sg.deployment.as_deref().unwrap_or(""),
-            ];
-            self.subgraph_not_checked
-                .with_label_values(&labels)
-                .set(i64::from(sg.is_not_checked()));
-            if let Some(kind) = sg.fault_kind() {
-                self.subgraph_fault
-                    .with_label_values(&[labels[0], labels[1], labels[2], kind])
-                    .set(1);
-            }
-            // Not checked publishes no verdict: a missing key must not read as a down subgraph.
-            if sg.is_not_checked() {
-                continue;
-            }
-            self.subgraph_up
-                .with_label_values(&labels)
-                .set(i64::from(sg.is_up()));
-            if let Some(block) = sg.indexed_block {
-                self.subgraph_block_height
-                    .with_label_values(&labels)
-                    .set(block as i64);
-            }
-            if let Some(behind) = sg.blocks_behind {
-                self.subgraph_blocks_behind
-                    .with_label_values(&labels)
-                    .set(behind as i64);
-            }
-            if let Some(lag) = sg.lag {
-                self.subgraph_lag_seconds
-                    .with_label_values(&labels)
-                    .set(lag.as_secs_f64());
-            }
-        }
         for net in &report.networks {
             if let Some(block) = net.block {
                 self.block_height
@@ -397,83 +441,100 @@ impl Metrics {
         self.cycle_duration.observe(report.duration.as_secs_f64());
 
         for reading in &report.readings {
-            // Each reading under its own network.
-            let net = reading.labels.network.as_str();
-            let group = reading.labels.group_or_ungrouped();
-            let account = reading.labels.account.as_deref().unwrap_or("");
-            let address = reading
-                .labels
-                .address
-                .map(|a| a.to_string())
-                .unwrap_or_default();
-            let watch_labels = [net, group, account, reading.id.kind];
+            self.publish_reading(reading);
+        }
+    }
 
-            self.read_duration
-                .with_label_values(&[net, reading.id.kind])
-                .observe(reading.duration.as_secs_f64());
+    fn healths(&self) -> [&CheckHealth; 4] {
+        [
+            &self.account_health,
+            &self.allowance_health,
+            &self.subgraph_health,
+            &self.network_health,
+        ]
+    }
 
-            if reading.is_unreadable() {
-                self.read_unknown.with_label_values(&watch_labels).set(1);
-                self.read_ok.with_label_values(&watch_labels).set(0);
-                self.read_errors
-                    .with_label_values(&[net, reading.id.kind])
-                    .inc();
+    fn health_for(&self, subject: &Subject) -> &CheckHealth {
+        match subject {
+            Subject::Account { .. } => &self.account_health,
+            Subject::Allowance { .. } => &self.allowance_health,
+            Subject::Subgraph { .. } => &self.subgraph_health,
+            Subject::Indexer { .. } | Subject::Network => &self.network_health,
+        }
+    }
+
+    fn publish_reading(&self, reading: &Reading) {
+        let net = reading.network.as_str();
+        let check = reading.id.kind;
+        self.check_duration
+            .with_label_values(&[net, check])
+            .observe(reading.duration.as_secs_f64());
+
+        let health = self.health_for(&reading.subject);
+        let mut labels = subject_labels(net, &reading.subject);
+        labels.push(check.to_string());
+
+        let observation = match &reading.observation {
+            Err(unreadable) => {
+                health.readable.with_label_values(&as_refs(&labels)).set(0);
+                labels.push(unreadable.kind.to_string());
+                health.fault.with_label_values(&as_refs(&labels)).set(1);
+                self.check_errors.with_label_values(&[net, check]).inc();
                 // No value is published for a failed read. Exporting a zero here is exactly
                 // how an endpoint outage becomes indistinguishable from an empty wallet.
-                continue;
+                return;
             }
-            self.read_ok.with_label_values(&watch_labels).set(1);
-            self.read_unknown.with_label_values(&watch_labels).set(0);
+            Ok(observation) => observation,
+        };
+        health.readable.with_label_values(&as_refs(&labels)).set(1);
+        if let Some(fault) = &observation.fault {
+            labels.push(fault.kind.to_string());
+            health.fault.with_label_values(&as_refs(&labels)).set(1);
+        }
 
-            let Ok(observation) = &reading.observation else {
-                continue;
-            };
-            let account_labels = [net, group, account, address.as_str()];
-            let spender = reading.labels.spender.as_deref().unwrap_or("");
-            let allowance_labels = [net, group, account, spender];
-
-            for m in &observation.measurements {
-                match m.name {
-                    M_ETH_BALANCE => self
-                        .eth_balance
-                        .with_label_values(&account_labels)
-                        .set(m.value),
-                    M_GRT_BALANCE => self
-                        .grt_balance
-                        .with_label_values(&account_labels)
-                        .set(m.value),
-                    M_IDLE_SECONDS => self
-                        .idle_seconds
-                        .with_label_values(&account_labels)
-                        .set(m.value),
-                    M_ALLOWANCE => self
-                        .allowance
-                        .with_label_values(&allowance_labels)
-                        .set(m.value),
-                    M_ALLOWANCE_UNLIMITED => self
-                        .allowance_unlimited
-                        .with_label_values(&allowance_labels)
-                        .set(m.value as i64),
-                    M_ALLOWANCE_EXACT_MAX => self
-                        .allowance_exact_max
-                        .with_label_values(&allowance_labels)
-                        .set(m.value as i64),
-                    M_ACTIVITY_SEEN => self
-                        .activity_seen
-                        .with_label_values(&account_labels)
-                        .set(m.value as i64),
-                    M_REMEDIATION_BELOW => self
-                        .remediation_threshold
-                        .with_label_values(&[net, group, account, unit_asset(m.unit)])
-                        .set(m.value),
-                    M_EVER_TRANSACTED => self
-                        .ever_transacted
-                        .with_label_values(&account_labels)
-                        .set(m.value as i64),
-                    other => {
-                        debug_assert!(false, "unmapped measurement {other}");
-                        tracing::warn!(measurement = other, "measurement has no metric");
-                    }
+        for m in &observation.measurements {
+            let values = subject_labels(net, &m.subject);
+            let l = as_refs(&values);
+            match m.name {
+                M_ETH_BALANCE => self.eth_balance.with_label_values(&l).set(m.value),
+                M_GRT_BALANCE => self.grt_balance.with_label_values(&l).set(m.value),
+                M_IDLE_SECONDS => self.idle_seconds.with_label_values(&l).set(m.value),
+                M_EVER_TRANSACTED => self
+                    .ever_transacted
+                    .with_label_values(&l)
+                    .set(m.value as i64),
+                M_ACTIVITY_SEEN => self.activity_seen.with_label_values(&l).set(m.value as i64),
+                M_REMEDIATION_BELOW => self
+                    .remediation_threshold
+                    .with_label_values(&[l[0], l[1], l[2], unit_asset(m.unit)])
+                    .set(m.value),
+                M_ALLOWANCE => self.allowance.with_label_values(&l).set(m.value),
+                M_ALLOWANCE_UNLIMITED => self
+                    .allowance_unlimited
+                    .with_label_values(&l)
+                    .set(m.value as i64),
+                M_ALLOWANCE_EXACT_MAX => self
+                    .allowance_exact_max
+                    .with_label_values(&l)
+                    .set(m.value as i64),
+                M_SUBGRAPH_UP => self.subgraph_up.with_label_values(&l).set(m.value as i64),
+                M_SUBGRAPH_BLOCK_HEIGHT => self
+                    .subgraph_block_height
+                    .with_label_values(&l)
+                    .set(m.value as i64),
+                M_SUBGRAPH_BLOCKS_BEHIND => self
+                    .subgraph_blocks_behind
+                    .with_label_values(&l)
+                    .set(m.value as i64),
+                M_SUBGRAPH_LAG => self.subgraph_lag_seconds.with_label_values(&l).set(m.value),
+                M_SOLO_DEPLOYMENTS => self
+                    .solo_deployments
+                    .with_label_values(&l)
+                    .set(m.value as i64),
+                M_SOLO_SIGNAL => self.solo_signal.with_label_values(&l).set(m.value),
+                other => {
+                    debug_assert!(false, "unmapped measurement {other}");
+                    tracing::warn!(measurement = other, "measurement has no metric");
                 }
             }
         }
@@ -496,8 +557,8 @@ impl Metrics {
     /// Priming every account would publish 0-valued counters implying repairs exist where none
     /// are configured — worse than a panel reading "No data".
     pub fn prime(&self, network: &str, armed: &[(String, String)]) {
-        for kind in ["eth_balance", "grt_balance", "allowance", "activity"] {
-            self.read_errors
+        for kind in CHECK_KINDS {
+            self.check_errors
                 .with_label_values(&[network, kind])
                 .inc_by(0);
         }
@@ -511,9 +572,22 @@ impl Metrics {
     }
 }
 
+fn as_refs(values: &[String]) -> Vec<&str> {
+    values.iter().map(String::as_str).collect()
+}
+
+/// Every check kind, for priming counters.
+pub const CHECK_KINDS: &[&str] = &[
+    "eth_balance",
+    "grt_balance",
+    "allowance",
+    "activity",
+    "subgraph",
+    graph_monitor_core::solo::KIND,
+];
+
 /// Metric label for the asset a measurement describes.
-fn unit_asset(unit: graph_monitor_core::watch::Unit) -> &'static str {
-    use graph_monitor_core::watch::Unit;
+fn unit_asset(unit: Unit) -> &'static str {
     match unit {
         Unit::Eth => "eth",
         Unit::Grt => "grt",

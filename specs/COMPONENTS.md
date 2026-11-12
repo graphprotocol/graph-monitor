@@ -9,27 +9,27 @@ component's own dashboard, not in this tool.
 ---
 
 ## Infra
-- ✅ Account `NetworkMonitor`: The EOA that tops up watched accounts.
-  - ✅ Balance watch: ETH.
+- ✅ Account `NetworkMonitor`: The EOA that tops up monitored accounts.
+  - ✅ Balance check: ETH.
 
 ---
 
 ## Billing
 
 - ✅ Account `FoundationBillingMultisig`: Foundation treasury that tops up the billing wallet.
-  - ✅ Balance watch: GRT.
-  - ✅ Allowance watch: GRT to `NetworkMonitor`.
+  - ✅ Balance check: GRT.
+  - ✅ Allowance check: GRT to `NetworkMonitor`.
 - ✅ Account `BillingWallet`: Collects consumer payments from the billing contract.
-  - ✅ Balance watch: ETH.
-  - ✅ Balance watch: GRT.
-  - ✅ Allowance watch: GRT to `NetworkMonitor`.
-  - ✅ Activity watch: calls to Billing contract to pull tokens.
+  - ✅ Balance check: ETH.
+  - ✅ Balance check: GRT.
+  - ✅ Allowance check: GRT to `NetworkMonitor`.
+  - ✅ Activity check: calls to Billing contract to pull tokens.
     - Billing Contract: `0x1b07d3344188908fb6deceac381f3ee63c48477a`
     - `event TokensPulled(address indexed user, uint256 amount);`
 - ✅ Account `GraphTallyWallet`: Funds indexer escrow.
-  - ✅ Balance watch: ETH.
-  - ✅ Balance watch: GRT.
-  - ✅ Activity watch: deposits into `PaymentsEscrow`.
+  - ✅ Balance check: ETH.
+  - ✅ Balance check: GRT.
+  - ✅ Activity check: deposits into `PaymentsEscrow`.
     - PaymentsEscrow: `0xf6Fcc27aAf1fcD8B254498c9794451d82afC673E`
     - `event Deposit(address indexed payer, address indexed collector, address indexed receiver, uint256 tokens);`
 
@@ -55,8 +55,8 @@ component's own dashboard, not in this tool.
 ## EBO — Epoch Block Oracle
 
 - ✅ Account `EpochBlockOracle`: Posts epoch block hashes on chain.
-  - ✅ Balance watch: ETH.
-  - ✅ Activity watch: epoch block hash submissions.
+  - ✅ Balance check: ETH.
+  - ✅ Activity check: epoch block hash submissions.
     - From: `EpochBlockOracle`
     - EBODataEdge: `0x633bb9790d7c4c59991cebd377c0ed6501a35ebe`
     - `event Log(bytes data);`
@@ -71,17 +71,17 @@ component's own dashboard, not in this tool.
   - from: each account
   - `event OracleVote(bytes32 indexed subgraphDeploymentID, bool deny, uint256 indexed oracleIndex, uint256 timestamp);`
 - ✅ Account `SamOracleEdgeAndNode`: Availability oracle operated by Edge & Node.
-  - ✅ Balance watch: ETH.
-  - ✅ Activity watch: wallet voting
+  - ✅ Balance check: ETH.
+  - ✅ Activity check: wallet voting
 - ✅ Account `SamOracleGraphOps`: Availability oracle operated by GraphOps.
-  - ✅ Balance watch: ETH.
-  - ✅ Activity watch: wallet voting
+  - ✅ Balance check: ETH.
+  - ✅ Activity check: wallet voting
 - ✅ Account `SamOracleInfraDAO`: Availability oracle operated by InfraDAO.
-  - ✅ Balance watch: ETH.
-  - ✅ Activity watch: wallet voting
+  - ✅ Balance check: ETH.
+  - ✅ Activity check: wallet voting
 - ✅ Account `SamOracleSemiotic`: Availability oracle operated by Semiotic.
-  - ✅ Balance watch: ETH.
-  - ✅ Activity watch: wallet voting
+  - ✅ Balance check: ETH.
+  - ✅ Activity check: wallet voting
 - ⬜ SAM activity: vote consensus
   - contract: `0x971B9d3d0Ae3ECa029CAB5eA1fB0F72c85e6a525` (RewardsManager)
   - `event RewardsDenylistUpdated(bytes32 indexed subgraphDeploymentID, uint256 sinceBlock);`
@@ -91,8 +91,8 @@ component's own dashboard, not in this tool.
 ## REO — Rewards Eligibility Oracle
 
 - ✅ Account `RewardsEligibilityOracle`: Marks which indexers may earn indexing rewards.
-  - ✅ Balance watch: ETH.
-  - ✅ Activity watch: eligibility updates.
+  - ✅ Balance check: ETH.
+  - ✅ Activity check: eligibility updates.
     - contract: `0x02753BaE61C08AbD4351Bce7F48524935C2Cc78E`  (RewardsEligibilityOracle)
     - `event IndexerEligibilityRenewed(address indexed indexer, address indexed oracle);`
 
@@ -108,9 +108,19 @@ component's own dashboard, not in this tool.
 ## Upgrade indexer
 
 - ✅ Account `UpgradeIndexerCurationBot`: Signals curation so the upgrade indexer serves new subgraphs.
-  - ✅ Balance watch: ETH.
-  - ✅ Activity watch: curation signals (L2Curation `Signalled`), from the subgraph source.
+  - ✅ Balance check: ETH.
+  - ✅ Activity check: curation signals (L2Curation `Signalled`), from the subgraph source.
 - ⬜ Curation signals landing. Newly published subgraphs are actually being signalled.
+
+---
+
+## Protocol
+
+Checks about the protocol on a network as a whole, read from the network-monitoring subgraph.
+
+- ✅ Solo deployments: per indexer, deployments it alone is allocated to that have curation
+  signal and are not denied rewards (`[checks.<network>] solo_deployments`). Needs the
+  network-monitoring subgraph version with solo tracking deployed.
 
 ---
 

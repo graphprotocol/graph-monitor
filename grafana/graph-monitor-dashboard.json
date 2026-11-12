@@ -38,7 +38,7 @@
         "spec": {
           "id": 11,
           "title": "Accounts now",
-          "description": "One row per watched account. Blank cells mean that asset is not watched for that account — not that it is zero.",
+          "description": "One row per account. Blank cells mean that check is not configured for that account — not that it is zero.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -679,7 +679,7 @@
         "spec": {
           "id": 16,
           "title": "Not seen in the lookback",
-          "description": "Read successfully, nothing within the account's lookback. Empty is the healthy state, and this is NOT the same as an unreadable watch. Quiet for = time since the last event, when known (a subgraph source knows it past the lookback); blank means no event was ever found.",
+          "description": "Read successfully, nothing within the account's lookback. Empty is the healthy state, and this is NOT the same as an unreadable check. Quiet for = time since the last event, when known (a subgraph source knows it past the lookback); blank means no event was ever found.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -845,7 +845,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "max by (network, group, owner, spender) (gm_account_allowance_unlimited{network=~\"$network\", group=~\"$group\"})",
+                        "expr": "max by (network, group, owner, spender) (gm_allowance_unlimited{network=~\"$network\", group=~\"$group\"})",
                         "format": "table",
                         "instant": true,
                         "range": false
@@ -867,7 +867,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "max by (network, group, owner, spender) (gm_account_allowance_exact_max{network=~\"$network\", group=~\"$group\"})",
+                        "expr": "max by (network, group, owner, spender) (gm_allowance_exact_max{network=~\"$network\", group=~\"$group\"})",
                         "format": "table",
                         "instant": true,
                         "range": false
@@ -889,7 +889,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "max by (network, group, owner, spender) (gm_account_allowance_grt{network=~\"$network\", group=~\"$group\"})",
+                        "expr": "max by (network, group, owner, spender) (gm_allowance_grt{network=~\"$network\", group=~\"$group\"})",
                         "format": "table",
                         "instant": true,
                         "range": false
@@ -1153,7 +1153,7 @@
         "spec": {
           "id": 20,
           "title": "Subgraphs now",
-          "description": "One row per subgraph check: the published version, plus each listed deployment. Up means it answered, from the expected deployment, without indexing errors and within max_lag. \"Not checked\" means our side failed (e.g. API key) and says nothing about the subgraph. Blank cells mean that number could not be measured this cycle, not that it is zero. Subgraphs on every chain are listed, not just the selected network; Blocks behind is only measured for the chain graph-monitor's RPC serves. Fault = why it is down or not checked: unreachable, stale, wrong_deployment, indexing_errors (down); not_configured, key_rejected (not checked, our side).",
+          "description": "One row per subgraph check: the published version, plus each listed deployment. Up means it answered, from the expected deployment, without indexing errors and within max_lag. \"Not checked\" means our side failed (e.g. API key) and says nothing about the subgraph. Blank cells mean that number could not be measured this cycle, not that it is zero. Subgraphs on every chain are listed, not just the selected network; Blocks behind is only measured for the chain graph-monitor's RPC serves. Not checked = gm_subgraph_readable is 0. Fault = why it is down or not checked: unreachable, stale, wrong_deployment, indexing_errors (down); not_configured, key_rejected (not checked, our side).",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1259,7 +1259,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "max by (network, subgraph, deployment) (gm_subgraph_not_checked)",
+                        "expr": "1 - max by (network, subgraph, deployment) (gm_subgraph_readable)",
                         "format": "table",
                         "instant": true,
                         "range": false
@@ -1560,7 +1560,7 @@
         "kind": "Panel",
         "spec": {
           "id": 23,
-          "title": "Read failures",
+          "title": "Check failures",
           "description": "Rising here while the source stays up usually means a provider limit — block range or rate — rather than an outage.",
           "links": [],
           "data": {
@@ -1579,9 +1579,9 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "sum by (watch) (rate(gm_read_errors_total{network=~\"$network\"}[$__rate_interval]))",
+                        "expr": "sum by (check) (rate(gm_check_errors_total{network=~\"$network\"}[$__rate_interval]))",
                         "instant": false,
-                        "legendFormat": "{{watch}}",
+                        "legendFormat": "{{check}}",
                         "range": true
                       }
                     },
@@ -1760,8 +1760,8 @@
         "kind": "Panel",
         "spec": {
           "id": 25,
-          "title": "Watch duration p95",
-          "description": "Activity watches dominate: they scan logs backwards and cost scales with how far back they must look.",
+          "title": "Check duration p95",
+          "description": "Activity checks dominate: they scan logs backwards and cost scales with how far back they must look. Subgraph and network checks are one query each.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1779,9 +1779,9 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "histogram_quantile(0.95, sum by (le, watch) (rate(gm_read_duration_seconds_bucket{network=~\"$network\"}[$__rate_interval])))",
+                        "expr": "histogram_quantile(0.95, sum by (le, check) (rate(gm_check_duration_seconds_bucket{network=~\"$network\"}[$__rate_interval])))",
                         "instant": false,
-                        "legendFormat": "{{watch}}",
+                        "legendFormat": "{{check}}",
                         "range": true
                       }
                     },
@@ -2022,7 +2022,7 @@
         "spec": {
           "id": 4,
           "title": "Unreadable",
-          "description": "Watches that could not read. NOT the same as a bad value — this means the tool is blind, usually a provider limit or an outage.",
+          "description": "Checks that could not read, of every kind: account, allowance, subgraph and network checks. NOT the same as a bad value: the tool is blind there, usually a provider limit, an outage or a missing API key. The fault kind is in gm_<subject>_fault{kind}.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2040,7 +2040,7 @@
                       },
                       "spec": {
                         "editorMode": "code",
-                        "expr": "sum(gm_read_unknown{network=~\"$network\", group=~\"$group\", account=~\"$account\"})",
+                        "expr": "count({__name__=~\"gm_(account|allowance|subgraph|network)_readable\", network=~\"$network\"} == 0) or vector(0)",
                         "instant": true,
                         "range": false
                       }
@@ -2569,6 +2569,269 @@
             }
           }
         }
+      },
+      "panel-30": {
+        "kind": "Panel",
+        "spec": {
+          "id": 30,
+          "title": "Solo deployments by indexer",
+          "description": "Per indexer: deployments it is the only one allocated to, that have curation signal and are not denied rewards, and the GRT signalled on them. Read from the network-monitoring subgraph by the solo_deployments network check ([checks.<network>] solo_deployments = true). No indexer is excluded: the upgrade indexer (0xbdfb5ee5a2abf4fc7bb1bd1221067aef7f9de491) is expected to have many. Empty with gm_network_readable{check=\"solo_deployments\"} = 0 means the check could not read, not that there are none.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "max by (network, indexer) (gm_indexer_solo_deployments{network=~\"$network\"})",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "max by (network, indexer) (gm_indexer_solo_signal_grt{network=~\"$network\"})",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "merge",
+                  "spec": {
+                    "options": {}
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true
+                      },
+                      "indexByName": {
+                        "indexer": 0,
+                        "network": 1,
+                        "Value #A": 2,
+                        "Value #B": 3
+                      },
+                      "renameByName": {
+                        "indexer": "Indexer",
+                        "network": "Chain",
+                        "Value #A": "Solo deployments",
+                        "Value #B": "Signal GRT"
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "sortBy",
+                  "spec": {
+                    "options": {
+                      "sort": [
+                        {
+                          "field": "Solo deployments",
+                          "desc": true
+                        }
+                      ]
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "showHeader": true,
+                "footer": {
+                  "show": false,
+                  "reducer": [
+                    "sum"
+                  ],
+                  "countRows": false,
+                  "fields": ""
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "text"
+                      }
+                    ]
+                  },
+                  "custom": {
+                    "align": "auto",
+                    "filterable": true
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Signal GRT"
+                    },
+                    "properties": [
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 0
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Solo deployments"
+                    },
+                    "properties": [
+                      {
+                        "id": "decimals",
+                        "value": 0
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "panel-31": {
+        "kind": "Panel",
+        "spec": {
+          "id": 31,
+          "title": "Solo deployments, top indexers",
+          "description": "The ten indexers with the most solo deployments over time. A step up is an indexer allocating alone to newly signalled deployments; a step down is another indexer joining, signal leaving, or the deployment being denied.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${datasource}"
+                      },
+                      "spec": {
+                        "editorMode": "code",
+                        "expr": "topk(10, max by (indexer) (gm_indexer_solo_deployments{network=~\"$network\"}))",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "{{indexer}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "",
+            "spec": {
+              "options": {
+                "legend": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "short",
+                  "min": 0,
+                  "decimals": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "text"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisPlacement": "auto",
+                    "drawStyle": "line",
+                    "lineInterpolation": "stepAfter",
+                    "fillOpacity": 0,
+                    "lineWidth": 2,
+                    "showPoints": "never",
+                    "spanNulls": true
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
       }
     },
     "layout": {
@@ -2846,6 +3109,46 @@
                         "element": {
                           "kind": "ElementReference",
                           "name": "panel-21"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "kind": "RowsLayoutRow",
+            "spec": {
+              "title": "Solo deployments",
+              "collapse": false,
+              "layout": {
+                "kind": "GridLayout",
+                "spec": {
+                  "items": [
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 0,
+                        "y": 0,
+                        "width": 10,
+                        "height": 9,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-30"
+                        }
+                      }
+                    },
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 10,
+                        "y": 0,
+                        "width": 14,
+                        "height": 9,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-31"
                         }
                       }
                     }

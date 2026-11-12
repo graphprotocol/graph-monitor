@@ -16,7 +16,7 @@ use crate::error::{Result, RpcError};
 /// Multicall3, at the same address on every chain it is deployed to.
 pub const CANONICAL_MULTICALL3: Address = address!("cA11bde05977b3631167028862bE2a173976CA11");
 
-/// Default requests in flight, across every watch sharing this client.
+/// Default requests in flight, across every check sharing this client.
 ///
 /// Low, because the shipped endpoint is a free public one that returns 429 well before a
 /// paid provider would. Raise it in config when pointing at something that can take it —
@@ -134,11 +134,11 @@ impl CallOutcome {
 pub struct Client {
     provider: alloy::providers::DynProvider,
     multicall3: Address,
-    /// Caps requests in flight. Watches run concurrently and some — the activity search
+    /// Caps requests in flight. Checks run concurrently and some — the activity search
     /// especially — issue many small calls, which is enough to earn a 429 from a public
     /// endpoint. Throttling here beats every call site remembering to be polite.
     permits: std::sync::Arc<tokio::sync::Semaphore>,
-    /// Largest `eth_getLogs` span this endpoint has accepted. Shared across watches so the
+    /// Largest `eth_getLogs` span this endpoint has accepted. Shared across checks so the
     /// provider's limit is discovered once per process rather than per search.
     log_range: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
