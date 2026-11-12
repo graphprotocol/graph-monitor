@@ -227,5 +227,5 @@ id    = "Dtr9rETvwokot4BSXaD5tECanXfqfJKcvHuaaEgPDD2D"
 # Checks about the protocol on a network, rather than any one account or subgraph. Keyed by
 # network; each reads that network's subgraph source.
 #
-# [checks.arbitrum-one]
-# solo_deployments = true
+[checks.arbitrum-one]
+solo_deployments = true
