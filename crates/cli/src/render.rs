@@ -229,128 +229,304 @@ fn balance_row((label, network): &AccountKey, row: &AccountRow) -> Vec<String> {
     ]
 }
 
+/// The grouped readout, in three parts: what the tool read from (**Inputs**), what it found
+/// (**Checks**, one subsection per kind of check), and a one-line summary.
 pub fn grouped(report: &CycleReport) -> String {
-    let mut out = String::new();
-    out.push_str(&header(report));
-    out.push_str("\n\n");
+    let mut inputs = vec![chains_table(report), sources_table(report)];
+    inputs.retain(|t| !t.is_empty());
 
-    // How the tool sees, before what it saw. Everything below is only as good as these.
-    out.push_str(&style::bold("Sources"));
-    out.push('\n');
-    out.push_str(&sources_table(report));
-    out.push('\n');
-
-    let rows = account_rows(report);
-
-    {
-        let mut table = Table::new(&[
-            ("Account", Align::Left),
-            ("Chain", Align::Left),
-            ("Address", Align::Left),
-            ("ETH", Align::Right),
-            ("GRT", Align::Right),
-            ("Last activity", Align::Right),
-            ("Remediation", Align::Left),
-        ]);
-
-        // Grouped, with ungrouped last. Groups are a display device here and nothing more.
-        let mut by_group: BTreeMap<Option<String>, Vec<(&AccountKey, &AccountRow)>> =
-            BTreeMap::new();
-        for (label, row) in &rows {
-            by_group
-                .entry(row.group.clone())
-                .or_default()
-                .push((label, row));
-        }
-        let ungrouped = by_group.remove(&None);
-        let grouped_count = by_group.len();
-
-        for (group, entries) in &by_group {
-            if let Some(name) = group {
-                table.section(style::bold(name));
-            }
-            for (label, row) in entries {
-                table.push(balance_row(label, row));
-            }
-        }
-        if let Some(entries) = ungrouped {
-            if grouped_count > 0 {
-                table.section(style::bold("ungrouped"));
-            }
-            for (label, row) in entries {
-                table.push(balance_row(label, row));
-            }
-        }
-
-        if table.is_empty() {
-            out.push_str("No account checks configured.\n");
-        } else {
-            out.push_str(&table.render());
-        }
-    }
-
-    {
-        out.push('\n');
-        out.push_str(&style::bold("GRT allowances"));
-        out.push('\n');
-
-        let mut table = Table::new(&[
-            ("Owner", Align::Left),
-            ("Chain", Align::Left),
-            ("Spender", Align::Left),
-            ("Allowance", Align::Right),
-            ("Unlimited", Align::Left),
-        ]);
-
-        for reading in &report.readings {
-            let Subject::Allowance { owner, spender, .. } = &reading.subject else {
-                continue;
-            };
-            let value = match measurement_value(reading, M_ALLOWANCE) {
-                Some(v) => describe_allowance_value(v),
-                None => UNREADABLE.to_string(),
-            };
-            // The exact classification, not a float comparison against 2^255.
-            let unlimited = match measurement_value(reading, M_ALLOWANCE_UNLIMITED) {
-                Some(v) if v > 0.0 => "yes",
-                Some(_) => "no",
-                None => UNREADABLE,
-            };
-            table.push(vec![
-                owner.clone(),
-                style::dim(&reading.network),
-                format!("→ {spender}"),
-                value,
-                unlimited.into(),
-            ]);
-        }
-
-        if table.is_empty() {
-            out.push_str("(none configured)\n");
-        } else {
-            out.push_str(&table.render());
-        }
-    }
-
+    let mut checks: Vec<(String, String)> = Vec::new();
+    checks.extend(accounts_section(report));
+    checks.extend(allowances_section(report));
     // Subgraphs are part of the network being checked, so they sit with the other findings.
     let subgraphs: Vec<&Reading> = report.of_kind("subgraph").collect();
     if !subgraphs.is_empty() {
-        out.push('\n');
-        out.push_str(&style::bold("Subgraphs"));
-        out.push('\n');
-        out.push_str(&subgraph_table(&subgraphs));
+        checks.push((
+            subsection_title("Subgraphs", &subgraphs, "checked"),
+            subgraph_table(&subgraphs),
+        ));
     }
-
     let solo: Vec<&Reading> = report.of_kind(graph_monitor_core::solo::KIND).collect();
     if !solo.is_empty() {
-        out.push('\n');
-        out.push_str(&style::bold("Solo deployments"));
-        out.push('\n');
-        out.push_str(&solo_table(&solo));
+        checks.push((solo_title(&solo), solo_table(&solo)));
     }
 
-    out.push_str(&format!("\n{}\n", summary_line(report)));
+    // Banners span the widest thing under them, so the parts read as blocks, up to a
+    // terminal's width: one long error message must not stretch every rule.
+    let width = inputs
+        .iter()
+        .chain(checks.iter().map(|(_, body)| body))
+        .flat_map(|t| t.lines())
+        .chain(checks.iter().map(|(title, _)| title.as_str()))
+        .map(|l| crate::table::display_width(l) + INDENT.len())
+        .max()
+        .unwrap_or(0)
+        .clamp(60, 80);
+
+    let mut out = String::new();
+    out.push_str(&title_line(report));
+    out.push_str("\n\n");
+
+    // How the tool sees, before what it saw. Everything below is only as good as these.
+    out.push_str(&banner("INPUTS", width));
+    out.push_str(
+        &inputs
+            .iter()
+            .map(|t| indent(t))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+
+    out.push('\n');
+    out.push_str(&banner("CHECKS", width));
+    if checks.is_empty() {
+        out.push_str(&indent("No checks configured.\n"));
+    }
+    let sections: Vec<String> = checks
+        .iter()
+        .map(|(title, body)| indent(&format!("{title}\n{body}")))
+        .collect();
+    out.push_str(&sections.join("\n"));
+
+    out.push('\n');
+    out.push_str(&style::dim(&"━".repeat(width)));
+    out.push('\n');
+    out.push_str(&summary_line(report));
+    out.push('\n');
     out
+}
+
+const INDENT: &str = "  ";
+
+fn indent(text: &str) -> String {
+    text.lines()
+        .map(|l| {
+            if l.is_empty() {
+                String::new()
+            } else {
+                format!("{INDENT}{l}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+/// `INPUTS ━━━━━…`, full width.
+fn banner(name: &str, width: usize) -> String {
+    let rule = width.saturating_sub(name.len() + 1).max(3);
+    format!("{} {}\n", style::bold(name), style::dim(&"━".repeat(rule)))
+}
+
+/// What ran and as of when: the latest block time across the chains read.
+fn title_line(report: &CycleReport) -> String {
+    let mut line = style::bold(&format!("graph-monitor {}", env!("CARGO_PKG_VERSION")));
+    if let Some(block) = report
+        .networks
+        .iter()
+        .filter_map(|n| n.block)
+        .max_by_key(|b| b.timestamp)
+    {
+        line.push_str(&style::dim(&format!(" · as of {}", block.timestamp_utc())));
+    }
+    line
+}
+
+/// `Accounts · 11 accounts · 1 unreadable`: the name, then how it went, so a glance down the
+/// left edge says which section needs reading.
+fn subsection_title(name: &str, readings: &[&Reading], noun: &str) -> String {
+    let mut parts = vec![style::dim(&format!("{} {noun}", readings.len()))];
+    parts.extend(health(readings));
+    format!(
+        "{}  {}",
+        style::bold(&format!("▸ {name}")),
+        parts.join(&style::dim(" · "))
+    )
+}
+
+/// Unreadable, faulty and pending-repair counts. Nothing when there are none: the tool grades
+/// no values, so there is no "ok" to claim.
+fn health(readings: &[&Reading]) -> Vec<String> {
+    let unreadable = readings.iter().filter(|r| r.is_unreadable()).count();
+    let faults = readings.iter().filter(|r| r.fault().is_some()).count();
+    let repairs = readings.iter().filter(|r| r.remediation.is_some()).count();
+    let mut parts = Vec::new();
+    if faults > 0 {
+        parts.push(style::alarm(&format!("{faults} fault(s)")));
+    }
+    if unreadable > 0 {
+        parts.push(style::alarm(&format!("{unreadable} unreadable")));
+    }
+    if repairs > 0 {
+        parts.push(style::action(&format!("{repairs} to remediate")));
+    }
+    parts
+}
+
+fn accounts_section(report: &CycleReport) -> Option<(String, String)> {
+    let rows = account_rows(report);
+    if rows.is_empty() {
+        return None;
+    }
+    let readings: Vec<&Reading> = report
+        .readings
+        .iter()
+        .filter(|r| matches!(r.subject, Subject::Account { .. }))
+        .collect();
+
+    let mut table = Table::new(&[
+        ("Account", Align::Left),
+        ("Chain", Align::Left),
+        ("Address", Align::Left),
+        ("ETH", Align::Right),
+        ("GRT", Align::Right),
+        ("Last activity", Align::Right),
+        ("Remediation", Align::Left),
+    ]);
+
+    // Grouped, with ungrouped last. Groups are a display device here and nothing more.
+    let mut by_group: BTreeMap<Option<String>, Vec<(&AccountKey, &AccountRow)>> = BTreeMap::new();
+    for (label, row) in &rows {
+        by_group
+            .entry(row.group.clone())
+            .or_default()
+            .push((label, row));
+    }
+    let ungrouped = by_group.remove(&None);
+    let grouped_count = by_group.len();
+
+    for (group, entries) in &by_group {
+        if let Some(name) = group {
+            table.section(style::bold(name));
+        }
+        for (label, row) in entries {
+            table.push(balance_row(label, row));
+        }
+    }
+    if let Some(entries) = ungrouped {
+        if grouped_count > 0 {
+            table.section(style::bold("ungrouped"));
+        }
+        for (label, row) in entries {
+            table.push(balance_row(label, row));
+        }
+    }
+
+    let mut parts = vec![style::dim(&format!(
+        "{} accounts, {} checks",
+        rows.len(),
+        readings.len()
+    ))];
+    parts.extend(health(&readings));
+    let title = format!(
+        "{}  {}",
+        style::bold("▸ Accounts"),
+        parts.join(&style::dim(" · "))
+    );
+    Some((title, table.render()))
+}
+
+fn allowances_section(report: &CycleReport) -> Option<(String, String)> {
+    let readings: Vec<&Reading> = report
+        .readings
+        .iter()
+        .filter(|r| matches!(r.subject, Subject::Allowance { .. }))
+        .collect();
+    if readings.is_empty() {
+        return None;
+    }
+
+    let mut table = Table::new(&[
+        ("Owner", Align::Left),
+        ("Chain", Align::Left),
+        ("Spender", Align::Left),
+        ("Allowance", Align::Right),
+        ("Unlimited", Align::Left),
+    ]);
+    for reading in &readings {
+        let Subject::Allowance { owner, spender, .. } = &reading.subject else {
+            continue;
+        };
+        let value = match measurement_value(reading, M_ALLOWANCE) {
+            Some(v) => describe_allowance_value(v),
+            None => style::alarm(UNREADABLE),
+        };
+        // The exact classification, not a float comparison against 2^255.
+        let unlimited = match measurement_value(reading, M_ALLOWANCE_UNLIMITED) {
+            Some(v) if v > 0.0 => "yes".to_string(),
+            Some(_) => "no".to_string(),
+            None => style::alarm(UNREADABLE),
+        };
+        table.push(vec![
+            owner.clone(),
+            style::dim(&reading.network),
+            format!("→ {spender}"),
+            value,
+            unlimited,
+        ]);
+    }
+    Some((
+        subsection_title("GRT allowances", &readings, "allowances"),
+        table.render(),
+    ))
+}
+
+/// Solo is one check per network, so its status is per network: unreadable, or the total.
+fn solo_title(readings: &[&Reading]) -> String {
+    let parts: Vec<String> = readings
+        .iter()
+        .map(|r| match &r.observation {
+            Err(_) => style::alarm(&format!("{UNREADABLE} unreadable on {}", r.network)),
+            Ok(obs) => {
+                let total: f64 = obs
+                    .measurements
+                    .iter()
+                    .filter(|m| m.name == M_SOLO_DEPLOYMENTS)
+                    .map(|m| m.value)
+                    .sum();
+                let indexers = obs
+                    .measurements
+                    .iter()
+                    .filter(|m| m.name == M_SOLO_DEPLOYMENTS)
+                    .count();
+                style::dim(&format!(
+                    "{} across {indexers} indexers on {}",
+                    group_thousands(total as u64),
+                    r.network
+                ))
+            }
+        })
+        .collect();
+    format!(
+        "{}  {}",
+        style::bold("▸ Solo deployments"),
+        parts.join(&style::dim(" · "))
+    )
+}
+
+/// Every chain the tool read, and the one block it read each at. Every value under CHECKS on
+/// that chain is from this block.
+fn chains_table(report: &CycleReport) -> String {
+    let mut table = Table::new(&[
+        ("Chain", Align::Left),
+        ("Chain id", Align::Right),
+        ("Read at block", Align::Right),
+        ("Block time", Align::Left),
+    ]);
+    for net in &report.networks {
+        let (block, time) = match net.block {
+            Some(b) => (group_thousands(b.number), style::dim(&b.timestamp_utc())),
+            // Even with nothing read, the readout still says where it was looking.
+            None => (style::alarm(UNREADABLE), style::alarm("no block read")),
+        };
+        table.push(vec![
+            style::bold(&net.network),
+            net.chain_id.to_string(),
+            block,
+            time,
+        ]);
+    }
+    table.render()
 }
 
 /// The tool's inputs: every network's RPC, then every subgraph it reads from. If one is
@@ -360,16 +536,16 @@ fn sources_table(report: &CycleReport) -> String {
         ("Source", Align::Left),
         ("Chain", Align::Left),
         ("Up", Align::Left),
-        ("Block", Align::Right),
+        ("Head", Align::Right),
         ("Lag", Align::Right),
         ("Detail", Align::Left),
     ]);
-    let rpcs = report
+    let sources = report
         .networks
         .iter()
-        .map(|n| (&n.source, Some(n.chain_id)));
-    let subgraphs = report.subgraph_sources.iter().map(|s| (s, None));
-    for (source, chain_id) in rpcs.chain(subgraphs) {
+        .map(|n| &n.source)
+        .chain(&report.subgraph_sources);
+    for source in sources {
         // `!` only when nothing could be read at all.
         let unknown = || {
             if source.head.is_none() {
@@ -378,10 +554,9 @@ fn sources_table(report: &CycleReport) -> String {
                 style::dim(UNCONFIGURED)
             }
         };
-        let detail = match (&source.fault, chain_id) {
-            (Some(fault), _) => style::alarm(&fault.summary()),
-            (None, Some(id)) => style::dim(&format!("chain {id}")),
-            (None, None) => String::new(),
+        let detail = match &source.fault {
+            Some(fault) => style::alarm(&fault.summary()),
+            None => String::new(),
         };
         table.push(vec![
             source.id.to_string(),
@@ -1120,7 +1295,7 @@ mod tests {
             ..SourceHealth::new(SourceId::subgraph("monitor"), "arbitrum-one")
         }];
         let out = grouped(&r);
-        let sources = &out[out.find("Sources").unwrap()..out.find("GRT allowances").unwrap()];
+        let sources = &out[out.find("INPUTS").unwrap()..out.find("CHECKS").unwrap()];
         let row = sources
             .lines()
             .find(|l| l.contains("subgraph:monitor"))
@@ -1133,11 +1308,11 @@ mod tests {
     }
 
     #[test]
-    fn subgraphs_come_after_the_findings_they_sit_with() {
+    fn subgraphs_sit_under_checks() {
         let mut r = report(vec![]);
         r.readings = readings(vec![subgraph("network", None, Some(1), SubgraphStatus::Up)]);
         let out = grouped(&r);
-        assert!(out.find("GRT allowances").unwrap() < out.find("Subgraphs").unwrap());
+        assert!(out.find("CHECKS").unwrap() < out.find("Subgraphs").unwrap());
         assert!(!grouped(&report(vec![])).contains("Subgraphs"));
     }
 
@@ -1256,15 +1431,23 @@ mod tests {
         assert!(row.contains("505,090,074"), "{row}");
         assert!(row.contains("2s"), "{row}");
         // How the tool sees comes before what it saw.
-        assert!(out.find("Sources").unwrap() < out.find("GRT allowances").unwrap());
+        assert!(out.find("INPUTS").unwrap() < out.find("CHECKS").unwrap());
     }
 
     #[test]
-    fn header_states_the_block() {
+    fn inputs_state_the_block_each_chain_was_read_at() {
         let out = grouped(&report(vec![]));
-        assert!(out.contains("block 505,090,074"), "{out}");
-        assert!(out.contains("arbitrum-one"), "{out}");
-        assert!(out.contains("chain 42161"), "{out}");
+        let row = out
+            .lines()
+            .find(|l| l.contains("42161"))
+            .unwrap_or_else(|| panic!("no chain row in:\n{out}"));
+        assert!(row.contains("arbitrum-one"), "{row}");
+        assert!(row.contains("505,090,074"), "{row}");
+        assert!(row.contains("2026-03-11"), "{row}");
+        assert!(
+            out.lines().next().unwrap().contains("as of 2026-03-11"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -1493,7 +1676,7 @@ mod tests {
     }
 
     #[test]
-    fn every_network_gets_a_header_line_and_rows_name_their_chain() {
+    fn every_network_gets_a_chain_row_and_rows_name_their_chain() {
         let mut gnosis = outcome(
             "eth_balance",
             "BillingWallet",
@@ -1521,8 +1704,8 @@ mod tests {
             checks: 1,
         });
         let out = grouped(&r);
-        assert!(out.contains("block 505,090,074"), "{out}");
-        assert!(out.contains("block 49,021,050"), "{out}");
+        assert!(out.contains("505,090,074"), "{out}");
+        assert!(out.contains("49,021,050"), "{out}");
         // The same label on two chains is two rows, each saying which chain.
         let rows: Vec<&str> = out
             .lines()
@@ -1617,6 +1800,37 @@ mod tests {
         assert_eq!(
             v["checks"][0]["measurements"][0]["subject"]["indexer"],
             json!(format!("{:#x}", Address::repeat_byte(0xaa)))
+        );
+    }
+
+    #[test]
+    fn sections_say_how_they_went() {
+        let r = report(vec![
+            outcome(
+                "eth_balance",
+                "Fine",
+                None,
+                Some((M_ETH_BALANCE, 1.0, Unit::Eth)),
+            ),
+            unreadable("eth_balance", "Broken"),
+        ]);
+        let out = grouped(&r);
+        let title = out
+            .lines()
+            .find(|l| l.trim_start().starts_with("▸ Accounts"))
+            .unwrap();
+        assert!(title.contains("2 accounts, 2 checks"), "{title}");
+        assert!(title.contains("1 unreadable"), "{title}");
+        // A section with nothing configured is left out rather than shown empty.
+        assert!(!out.contains("GRT allowances"), "{out}");
+        // The summary closes the readout.
+        assert!(
+            out.trim_end()
+                .lines()
+                .last()
+                .unwrap()
+                .contains("1 unreadable"),
+            "{out}"
         );
     }
 

@@ -154,7 +154,7 @@ impl Table {
 /// Byte length would skew every column containing `─` or `…`, and a naive character count
 /// would skew every styled cell by the length of its escape codes — which is how coloured
 /// tables end up with ragged columns.
-fn display_width(s: &str) -> usize {
+pub fn display_width(s: &str) -> usize {
     let mut width = 0;
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
